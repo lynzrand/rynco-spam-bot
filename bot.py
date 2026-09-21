@@ -13,7 +13,13 @@ from api import APIError, Classifier, Telegram
 from media import Media
 
 LOG = logging.getLogger("spam-bot")
-UPDATES = ["message", "edited_message", "chat_member", "callback_query"]
+UPDATES = [
+    "message",
+    "edited_message",
+    "chat_member",
+    "callback_query",
+    "message_reaction",
+]
 ADMINS = {"creator", "administrator"}
 
 
@@ -33,7 +39,7 @@ def database(path):
         );
         CREATE TABLE IF NOT EXISTS observations (
             id INTEGER PRIMARY KEY, chat INTEGER, identity TEXT, event TEXT,
-            message INTEGER, sent REAL, checked TEXT,
+            message INTEGER, sent REAL, checked TEXT, counted INTEGER NOT NULL DEFAULT 0,
             UNIQUE(chat, identity, event)
         );
         CREATE INDEX IF NOT EXISTS subject_observations
@@ -51,6 +57,15 @@ def database(path):
             PRIMARY KEY(case_id, voter)
         );
     """)
+    # Preserve the existing message budget when upgrading the deployed database.
+    if "counted" not in {
+        row[1] for row in db.execute("PRAGMA table_info(observations)")
+    }:
+        with db:
+            db.execute(
+                "ALTER TABLE observations ADD COLUMN counted INTEGER NOT NULL DEFAULT 0"
+            )
+            db.execute("UPDATE observations SET counted=1 WHERE event!='join'")
     return db
 
 
@@ -180,25 +195,47 @@ class Bot:
             }
         return evidence, images
 
-    def observe(self, chat, subject, sender, event, message=None):
+    def trusted(self, chat, subject):
+        exempt = self.db.execute(
+            "SELECT exempt FROM subjects WHERE chat=? AND identity=?", (chat, subject)
+        ).fetchone()
+        if exempt and exempt[0]:
+            return True
+        checked = self.db.execute(
+            "SELECT count(*) FROM observations WHERE chat=? AND identity=? AND counted=1 AND checked IS NOT NULL",
+            (chat, subject),
+        ).fetchone()[0]
+        pending = self.db.execute(
+            "SELECT 1 FROM cases WHERE chat=? AND identity=? AND phase IN ('review','ban','banned','restore') LIMIT 1",
+            (chat, subject),
+        ).fetchone()
+        return checked >= self.first_messages and not pending
+
+    def observe(
+        self, chat, subject, sender, event, message=None, *, edited=False, reaction=None
+    ):
         kind, target = subject.split(":")
         if sender.get("is_bot"):
             return
         if kind == "user" and self.member(chat, int(target))["status"] in ADMINS:
             return
+        if reaction and self.trusted(chat, subject):
+            return
+        counted = bool(message and event != "join" and not edited)
         with self.db:
             self.db.execute(
                 "INSERT OR IGNORE INTO subjects(chat,identity) VALUES (?,?)",
                 (chat, subject),
             )
             self.db.execute(
-                "INSERT OR IGNORE INTO observations(chat,identity,event,message,sent) VALUES (?,?,?,?,?)",
+                "INSERT OR IGNORE INTO observations(chat,identity,event,message,sent,counted) VALUES (?,?,?,?,?,?)",
                 (
                     chat,
                     subject,
                     event,
                     message["message_id"] if message else None,
                     message["date"] if message else time.time(),
+                    counted,
                 ),
             )
             if event == "join" and message:
@@ -222,16 +259,28 @@ class Bot:
             "SELECT * FROM observations WHERE chat=? AND identity=? AND event=?",
             (chat, subject, event),
         ).fetchone()
-        # Edits of a selected message stay eligible after the tenth message.
-        if message and event != "join":
+        # Edits of even unseen old messages are checked only inside the initial
+        # observation window. They never consume an original-message slot.
+        if (
+            edited
+            and self.db.execute(
+                "SELECT count(*) FROM observations WHERE chat=? AND identity=? AND counted=1",
+                (chat, subject),
+            ).fetchone()[0]
+            >= self.first_messages
+        ):
+            return
+        if counted:
             ordinal = self.db.execute(
-                "SELECT count(*) FROM observations WHERE chat=? AND identity=? AND event!='join' AND id<=?",
+                "SELECT count(*) FROM observations WHERE chat=? AND identity=? AND counted=1 AND id<=?",
                 (chat, subject, observation["id"]),
             ).fetchone()[0]
             if ordinal > self.first_messages:
                 return
         digest = hashlib.sha256(
-            json.dumps(message if event != "join" else sender, sort_keys=True).encode()
+            json.dumps(
+                reaction or (message if event != "join" else sender), sort_keys=True
+            ).encode()
         ).hexdigest()
         if observation["checked"] == digest:
             return
@@ -239,6 +288,14 @@ class Bot:
             evidence, images = self.evidence(
                 subject, sender, message if event != "join" else None
             )
+            if reaction:
+                evidence["event"] = "reaction"
+                evidence["reaction"] = reaction["new_reaction"]
+                evidence["context"] = (
+                    "Check the reacting identity, not the author of the reacted-to message."
+                )
+            elif edited:
+                evidence["event"] = "edited_message"
             result = self.classifier.classify(evidence, images)
             if evidence["missing_media"] and result["verdict"] == "clean":
                 result = {
@@ -278,7 +335,11 @@ class Bot:
                             result["reason"],
                             phase,
                             " ".join(name.split())[:80],
-                            message["message_id"] if message else None,
+                            (
+                                message["message_id"]
+                                if message
+                                else reaction["message_id"] if reaction else None
+                            ),
                         ),
                     )
             self.db.execute(
@@ -289,6 +350,29 @@ class Bot:
     def update(self, update):
         if "callback_query" in update:
             self.vote(update["callback_query"])
+            return
+        reaction = update.get("message_reaction")
+        if reaction:
+            chat = reaction["chat"]["id"]
+            if chat not in self.chats or not any(
+                item not in reaction["old_reaction"]
+                for item in reaction["new_reaction"]
+            ):
+                return
+            actor = identity(
+                {
+                    "chat": reaction["chat"],
+                    "sender_chat": reaction.get("actor_chat"),
+                    "from": reaction.get("user"),
+                }
+            )
+            if actor:
+                self.observe(
+                    chat,
+                    *actor,
+                    f"reaction:{reaction['message_id']}:{update['update_id']}",
+                    reaction=reaction,
+                )
             return
         member = update.get("chat_member")
         if member:
@@ -314,7 +398,18 @@ class Bot:
             return
         subject = identity(message)
         if subject:
-            self.observe(chat, *subject, str(message["message_id"]), message)
+            edited = "edited_message" in update
+            self.observe(
+                chat,
+                *subject,
+                (
+                    f"edit:{message['message_id']}"
+                    if edited
+                    else str(message["message_id"])
+                ),
+                message,
+                edited=edited,
+            )
 
     def vote(self, query):
         """One immutable vote per current member; one moderator click to restore."""
@@ -541,6 +636,11 @@ class Bot:
                 ).fetchall()
                 for message in messages:
                     self.delete(chat, message[0])
+                self.tg.call(
+                    "deleteAllMessageReactions",
+                    chat_id=chat,
+                    **{"user_id" if kind == "user" else "actor_chat_id": target},
+                )
                 with self.db:
                     self.db.execute("UPDATE cases SET deleted=1 WHERE id=?", (case_id,))
             if case["review_message"] and case["dirty"]:

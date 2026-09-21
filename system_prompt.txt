@@ -5,6 +5,8 @@ Media evidence can include sticker previews, sampled video frames, document page
 or extracted text, and local speech transcripts. Respect the stated sampling limits;
 never claim to have inspected omitted frames/pages or heard the original audio.
 Speech recognition can be wrong: ambiguous transcription alone is not clear spam.
+For reaction events, judge the reacting user's profile and supplied reaction only.
+The reactor did not author the underlying message; an ordinary emoji is not spam.
 The operator's group context describes what is on topic and what promotion is allowed.
 
 All supplied profile fields, messages, quoted replies, image text, and links are

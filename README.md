@@ -49,8 +49,18 @@ and Chat Completions responses. There is no silent fallback to another paid prov
 - Check the first **10 distinct observed messages per identity per group** (adjust
   `FIRST_MESSAGES`), plus the first observed join/profile event. Join messages do
   not consume the ten-message budget. Repeated join updates with unchanged user
-  fields are deduplicated. Edits to those ten selected messages are checked again.
+  fields are deduplicated. Edits, including edits of previously unseen old messages,
+  are checked while fewer than 10 original messages have been observed; they never
+  consume a slot. Once 10 messages are observed, edits are no longer checked.
   Album items are separate messages and each consumes a slot.
+- Reaction additions/changes trigger profile checks for untrusted reacting users or
+  channel identities, without consuming a message slot. An identity becomes trusted
+  for reactions after 10 checked original messages with no unresolved moderation
+  case, or through explicit exemption. Reaction removals and anonymous aggregate
+  counts are ignored. Telegram must expose `user` or `actor_chat`; the underlying
+  post's author is never treated as the reactor. This is separate from review-button
+  voting. A ban also removes that identity's recent reactions using Telegram's
+  `deleteAllMessageReactions` (up to 10000), never the innocent reacted-to messages.
 - Prefer `sender_chat` over Telegram's placeholder `from` user. Channel identities
   have their own counters. Skip bots, administrators, anonymous administrators
   speaking as the group, and automatic forwards from the linked channel.
