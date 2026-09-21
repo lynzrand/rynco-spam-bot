@@ -297,14 +297,6 @@ class Bot:
             elif edited:
                 evidence["event"] = "edited_message"
             result = self.classifier.classify(evidence, images)
-            if evidence["missing_media"] and result["verdict"] == "clean":
-                result = {
-                    "verdict": "suspicious",
-                    "reason": (
-                        "Media inspection incomplete: "
-                        + "; ".join(evidence["missing_media"])
-                    )[:300],
-                }
         except APIError as exc:
             LOG.warning("Classification unavailable: %s", exc)
             result = {

@@ -86,9 +86,10 @@ and Chat Completions responses. There is no silent fallback to another paid prov
   cannot undo bans. Exemption is saved only after the unban succeeds. The person may
   rejoin; Telegram cannot restore deleted messages. A sender-chat exemption cannot
   identify or exempt its hidden owner or the owner's other channels.
-- Classifier errors, invalid model output, or an otherwise clean message with
-  unreadable/unsupported media go to human review, never an automatic ban based on
-  the error alone. Inspection failures identify the media type and failing decoder;
+- Classifier errors or invalid model output go to human review, never an automatic
+  ban based on the error alone. Unknown profiles and unreadable/unsupported media
+  pass when available evidence shows no spam. Inspection failures identify the
+  media type and failing decoder;
   logs omit media contents and credentials. Profile metadata unavailable through
   Telegram remains unknown.
 
@@ -116,8 +117,8 @@ Sampling is not exhaustive inspection. Short-lived video text, later PDF pages,
 speech after two minutes, Office layout, and TGS frames outside the preview can be
 missed. Recognition errors do not by themselves establish spam. Unknown binary
 formats (including legacy `.doc`/`.xls`), encrypted/corrupt documents, unavailable
-previews, and over-limit attachments still require review. Office expansion is
-limited to 32 MiB/2000 ZIP entries and image/video dimensions to 16 million pixels.
+previews, and over-limit attachments do not by themselves require review. Office
+expansion is limited to 32 MiB/2000 ZIP entries and image/video dimensions to 16 million pixels.
 Decoder calls time out after 30 seconds (Whisper: 90 seconds).
 
 ## Telegram constraints and operational limits

@@ -28,12 +28,14 @@ Decision policy:
   or equivalent profile-funnel wording is spam, including when used as their name
   or in image text. Do not require an accessible bio, a visible link, or additional
   proof of a scam, and do not downgrade this to suspicious.
-- suspicious: plausible spam with ambiguous intent or insufficient context. This
-  goes to a human vote; uncertain cases must not receive an automatic ban.
+- suspicious: observable evidence suggests spam, but its intent is ambiguous. This
+  goes to a human vote; uncertainty alone does not warrant review.
 - clean: ordinary participation, including legitimate links and relevant questions.
-- A missing visible profile photo is a WEAK caution signal. Privacy settings can
-  hide photos. Missing photo, bio, or username alone never warrants suspicious or
-  spam. An unavailable API field is unknown, not an empty or deceptive profile.
+- Missing, unknown, private, or unreadable profiles and media are neutral. If the
+  available evidence shows no spam indicators, return clean even when images,
+  stickers, profile photos, bios, or other content cannot be inspected. Do not
+  request review just because content is unavailable or sampling is incomplete.
+  An unavailable API field is unknown, not an empty or deceptive profile.
 - Do not infer age, gender, ethnicity, criminality, or trustworthiness from appearance,
   language, nationality, political opinions, or use of a channel identity.
 - Distinguish promotion from quotation, news, criticism, reporting a scam, security
