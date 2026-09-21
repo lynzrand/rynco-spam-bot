@@ -109,7 +109,7 @@ class BotTests(unittest.TestCase):
         )
         self.bot.maintain()
 
-    def test_first_ten_deduplicate_and_recheck_edits_after_restart(self):
+    def test_first_ten_deduplicate_and_skip_edits_after_restart(self):
         first = self.send()
         self.bot.update({"message": first})
         for number in range(2, 12):
@@ -121,9 +121,31 @@ class BotTests(unittest.TestCase):
         self.send(12)
         self.assertEqual(len(self.model.calls), 10)
         self.bot.update({"edited_message": {**first, "text": "Edited solicitation"}})
+        self.assertEqual(len(self.model.calls), 10)
+        self.assertEqual(
+            self.db.execute("SELECT sum(counted) FROM observations").fetchone()[0], 12
+        )
+
+    def test_edit_at_nine_is_checked_but_edit_at_ten_is_not(self):
+        for number in range(1, 10):
+            self.send(number)
+        self.bot.update({"edited_message": self.message(100, text="Changed")})
+        self.assertEqual(len(self.model.calls), 10)
+        self.send(10)
+        self.bot.update({"edited_message": self.message(100, text="Changed again")})
         self.assertEqual(len(self.model.calls), 11)
         self.assertEqual(
-            self.db.execute("SELECT count(*) FROM observations").fetchone()[0], 12
+            self.db.execute("SELECT sum(counted) FROM observations").fetchone()[0], 10
+        )
+
+    def test_original_retried_after_edit_still_counts_once(self):
+        # A transient API failure can defer an original update until after its edit.
+        self.bot.update({"edited_message": self.message(1, text="Edited")})
+        original = self.message(1)
+        self.bot.update({"message": original})
+        self.bot.update({"message": original})
+        self.assertEqual(
+            self.db.execute("SELECT sum(counted) FROM observations").fetchone()[0], 1
         )
 
     def test_channel_identity_overrides_fake_user_and_counts_separately(self):
@@ -139,6 +161,101 @@ class BotTests(unittest.TestCase):
         self.assertFalse(self.tg.calls_for("banChatMember"))
         self.assertIn(
             {"chat_id": CHAT, "message_id": 1}, self.tg.calls_for("deleteMessage")
+        )
+
+    def test_old_unseen_edits_are_checked_without_consuming_budget(self):
+        # Edits arriving for messages predating the bot must not use a new-message slot.
+        for number in range(20):
+            self.bot.update({"edited_message": self.message(100 + number)})
+        self.assertEqual(len(self.model.calls), 20)
+        self.assertEqual(
+            self.db.execute("SELECT sum(counted) FROM observations").fetchone()[0], 0
+        )
+        for number in range(1, 12):
+            self.send(number)
+        self.assertEqual(len(self.model.calls), 30)
+        self.model.verdict = "spam"
+        self.bot.update({"edited_message": self.message(11, text="New advertising")})
+        self.bot.maintain()
+        self.assertIsNone(self.case())
+        self.assertEqual(len(self.model.calls), 30)
+        self.assertEqual(
+            self.db.execute("SELECT sum(counted) FROM observations").fetchone()[0], 11
+        )
+
+    def reaction(self, update_id=100, user=USER, actor_chat=None, old=None, new=None):
+        return {
+            "update_id": update_id,
+            "message_reaction": {
+                "chat": {"id": CHAT},
+                "message_id": 900,
+                "date": int(time.time()),
+                "user": user,
+                "actor_chat": actor_chat,
+                "old_reaction": old or [],
+                "new_reaction": (
+                    new if new is not None else [{"type": "emoji", "emoji": "👍"}]
+                ),
+            },
+        }
+
+    def test_untrusted_reactions_check_reactor_without_deleting_target_message(self):
+        self.model.verdict = "spam"
+        self.bot.update(self.reaction())
+        self.bot.maintain()
+        self.assertEqual(self.model.calls[0][0]["event"], "reaction")
+        self.assertEqual(
+            self.db.execute("SELECT sum(counted) FROM observations").fetchone()[0], 0
+        )
+        self.assertEqual(self.case()["phase"], "banned")
+        self.assertFalse(self.tg.calls_for("deleteMessage"))
+        self.assertEqual(
+            self.tg.calls_for("deleteAllMessageReactions"),
+            [{"chat_id": CHAT, "user_id": 42}],
+        )
+
+    def test_reactions_do_not_create_trust_or_consume_message_budget(self):
+        update = self.reaction()
+        self.bot.update(update)
+        self.bot.update(update)
+        self.assertEqual(len(self.model.calls), 1)
+        self.assertFalse(self.bot.trusted(CHAT, "user:42"))
+        for number in range(1, 11):
+            self.send(number)
+        self.assertTrue(self.bot.trusted(CHAT, "user:42"))
+        self.bot.update(self.reaction(101))
+        self.assertEqual(len(self.model.calls), 11)
+
+    def test_pending_review_prevents_reaction_trust(self):
+        self.model.verdict = "suspicious"
+        for number in range(1, 11):
+            self.send(number)
+        self.assertFalse(self.bot.trusted(CHAT, "user:42"))
+        self.bot.update(self.reaction())
+        self.assertEqual(len(self.model.calls), 11)
+
+    def test_reaction_channel_identity_and_removals(self):
+        self.bot.update(
+            self.reaction(user=None, actor_chat={"id": -900, "title": "Channel"})
+        )
+        self.assertEqual(
+            self.db.execute("SELECT identity FROM observations").fetchone()[0],
+            "chat:-900",
+        )
+        self.bot.update(self.reaction(101, new=[]))
+        self.bot.update(self.reaction(102, user=None, actor_chat={"id": CHAT}))
+        self.bot.update({"message_reaction_count": {"chat": {"id": CHAT}}})
+        self.assertEqual(len(self.model.calls), 1)
+
+    def test_existing_database_budget_migration(self):
+        self.send()
+        self.send(2, new_chat_members=[USER])
+        with self.db:
+            self.db.execute("ALTER TABLE observations DROP COLUMN counted")
+        self.db.close()
+        self.db = database(self.path)
+        self.assertEqual(
+            self.db.execute("SELECT sum(counted) FROM observations").fetchone()[0], 1
         )
 
     def test_anonymous_admin_and_automatic_forward_are_skipped(self):
@@ -368,6 +485,16 @@ class BotTests(unittest.TestCase):
         self.tg.failures["image"] = APIError("Image")
         self.send(photo=[{"file_id": "bad"}])
         self.assertEqual(self.case()["phase"], "review")
+
+    def test_readable_sticker_does_not_create_unreadable_media_review(self):
+        # Regression for the real group report: all stickers used to be marked missing.
+        self.send(
+            sticker={"file_id": "sticker", "is_animated": False, "is_video": False}
+        )
+        self.assertIsNone(self.case())
+        evidence, images = self.model.calls[0]
+        self.assertEqual(evidence["missing_media"], [])
+        self.assertEqual(images[0][0], "Sticker image")
 
     def test_profile_and_message_images_are_labelled(self):
         self.tg.photos = [[{"file_id": "avatar"}]]
