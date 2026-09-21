@@ -1,7 +1,8 @@
 # Telegram spam bot
 
 A small Python 3.11+ bot using the Telegram Bot API, an OpenAI-compatible vision
-Chat Completions endpoint, and SQLite. No runtime packages or containers required.
+Chat Completions endpoint, and SQLite. No third-party Python packages or containers
+are required. Media extraction uses FFmpeg, Poppler, and whisper.cpp.
 The configured provider is **DeepSeek 4.1 Flash on OpenCode Go**:
 `https://opencode.ai/zen/go/v1`, model `deepseek-flash`.
 
@@ -55,8 +56,9 @@ and Chat Completions responses. There is no silent fallback to another paid prov
   speaking as the group, and automatic forwards from the linked channel.
 - Inspect display names, usernames, accessible bio/description, latest visible
   profile photo, text, captions, link entities, reply text, Telegram photos, and
-  image documents. Missing visible photo adds caution in the prompt but cannot
-  justify a flag alone. Download images locally (8 MiB maximum each) and send base64
+  image documents and extracted media (see below). Missing visible photo adds caution
+  in the prompt but cannot justify a flag alone. Download photos locally (8 MiB maximum
+  each; other attachments up to 20 MiB) and send base64
   data; the model provider never receives Telegram token-bearing download URLs.
 - **Spam:** persist the decision, ban with the appropriate user/sender-chat method,
   and delete messages. User bans request server-side history revocation. Sender-chat
@@ -74,8 +76,37 @@ and Chat Completions responses. There is no silent fallback to another paid prov
   identify or exempt its hidden owner or the owner's other channels.
 - Classifier errors, invalid model output, or an otherwise clean message with
   unreadable/unsupported media go to human review, never an automatic ban based on
-  the error alone. Voice/video/audio/stickers and non-image documents are not
-  analyzed. Profile metadata unavailable through Telegram remains unknown.
+  the error alone. Inspection failures identify the media type and failing decoder;
+  logs omit media contents and credentials. Profile metadata unavailable through
+  Telegram remains unknown.
+
+## Media inspection
+
+Install FFmpeg (`ffmpeg`, `ffprobe`), Poppler (`pdfinfo`, `pdftoppm`), and whisper.cpp
+(`whisper-cli`). Place the multilingual base model at `models/ggml-base.bin` or set
+`WHISPER_MODEL_PATH`; the directory is gitignored. On Camellia these tools and the
+model were provisioned by the host assistant. `.env.example` lists optional path
+overrides. Each decoder uses at most two threads; Whisper loads on demand, with no
+resident transcription server. Temporary attachment files are deleted after use.
+
+| Media | Inspection |
+| --- | --- |
+| Static stickers | Full visible sticker image |
+| TGS animated stickers | Telegram's thumbnail preview, explicitly labelled partial |
+| Video stickers, videos, video notes, GIFs | Up to six sampled frames across the clip |
+| Voice, audio, video soundtracks | Local multilingual Whisper transcription of the first 120 seconds |
+| Image documents | Decoded still image or sampled animation frames |
+| PDFs, including scanned pages | First six pages rendered for vision |
+| DOCX/XLSX/PPTX, ODT/ODS/ODP | Extracted XML text and up to six embedded images |
+| UTF-8/UTF-16 text, Markdown, CSV, JSON, XML, HTML, logs | Up to 16000 text characters; never executed |
+
+Sampling is not exhaustive inspection. Short-lived video text, later PDF pages,
+speech after two minutes, Office layout, and TGS frames outside the preview can be
+missed. Recognition errors do not by themselves establish spam. Unknown binary
+formats (including legacy `.doc`/`.xls`), encrypted/corrupt documents, unavailable
+previews, and over-limit attachments still require review. Office expansion is
+limited to 32 MiB/2000 ZIP entries and image/video dimensions to 16 million pixels.
+Decoder calls time out after 30 seconds (Whisper: 90 seconds).
 
 ## Telegram constraints and operational limits
 
@@ -104,7 +135,7 @@ This is a serial worker for small groups: model/API latency delays callbacks and
 notice cleanup. Telegram retains undelivered updates for at most 24 hours, so long
 downtime or sustained overload can miss messages. The database retains message IDs
 and case reasons indefinitely; it temporarily contains full queued updates. Raw
-image bytes are not stored. Visible profile data and message content go to the
+media bytes are not retained after extraction. Visible profile data and message content go to the
 configured model provider. Keep the database and `.env` private. No message history
 from before the bot started is imported. Three-member voting does not prevent
 collusion by three accounts.
@@ -113,12 +144,14 @@ collusion by three accounts.
 
 ```sh
 python3 -m unittest -v
-python3 -m py_compile api.py bot.py test_bot.py smoke_test.py
+python3 -m py_compile api.py bot.py media.py test_bot.py test_media.py smoke_test.py
 ```
 
 Tests use fake Telegram calls and a temporary database. They cover counting/edits,
 join deduplication, non-member comments, channel identities, voting authorization,
 restart recovery, ban/unban failures, expiry, and multimodal request validation.
+Real decoder tests generate small synthetic video/GIF/PDF/audio fixtures. These
+tests skip with an explicit reason if their host tools/model are not installed.
 They do not measure model accuracy or prove Telegram integration with a real group.
 
 After loading `.env`, `python3 smoke_test.py` sends eight synthetic cases to the

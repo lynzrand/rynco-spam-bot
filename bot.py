@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from api import APIError, Classifier, Telegram
+from media import Media
 
 LOG = logging.getLogger("spam-bot")
 UPDATES = ["message", "edited_message", "chat_member", "callback_query"]
@@ -78,6 +79,7 @@ class Bot:
     def __init__(self, db, telegram, classifier, chats, first_messages=10):
         self.db, self.tg, self.classifier = db, telegram, classifier
         self.chats, self.first_messages = set(chats), first_messages
+        self.media = Media(telegram)
 
     def member(self, chat, user):
         return self.tg.call("getChatMember", chat_id=chat, user_id=user)
@@ -92,6 +94,7 @@ class Bot:
         profile.update(description=None, photo_status="unknown")
         images = []
         missing_media = []
+        media_evidence = []
         try:
             info = self.tg.call("getChat", chat_id=int(target))
             profile["description"] = info.get("bio", info.get("description"))
@@ -112,22 +115,22 @@ class Bot:
                 images.append(("Sender profile photo", self.tg.image(file_id)))
             elif kind == "user" or info:
                 profile["photo_status"] = "no_visible_photo"
-        except APIError:
+        except APIError as exc:
             if profile["photo_status"] == "visible":
                 missing_media.append("profile image unavailable")
+                LOG.warning("Profile image could not be inspected: %s", exc)
 
         if message:
             photo = message.get("photo")
-            document = message.get("document", {})
             file_id = photo[-1]["file_id"] if photo else None
-            if document.get("mime_type", "").startswith("image/"):
-                file_id = document["file_id"]
             if file_id:
                 try:
                     images.append(("Message image", self.tg.image(file_id)))
-                except APIError:
+                except APIError as exc:
                     missing_media.append("message image unavailable")
+                    LOG.warning("Message photo could not be inspected: %s", exc)
             for media in (
+                "document",
                 "sticker",
                 "video",
                 "animation",
@@ -136,9 +139,22 @@ class Bot:
                 "audio",
             ):
                 if media in message:
-                    missing_media.append(media + " is not inspected")
-            if document and not file_id:
-                missing_media.append("document is not inspected")
+                    item = message[media]
+                    try:
+                        inspected = self.media.inspect(media, item)
+                        images.extend(inspected.images)
+                        media_evidence.append(
+                            {
+                                "kind": media,
+                                "text": inspected.text,
+                                "notes": inspected.notes,
+                                "filename": item.get("file_name"),
+                                "emoji": item.get("emoji"),
+                            }
+                        )
+                    except APIError as exc:
+                        missing_media.append(f"{media}: {exc}")
+                        LOG.warning("%s could not be inspected: %s", media, exc)
         fields = (
             "text",
             "caption",
@@ -155,6 +171,7 @@ class Bot:
                 {k: message[k] for k in fields if k in message} if message else {}
             ),
             "missing_media": missing_media,
+            "media": media_evidence,
         }
         if message and message.get("reply_to_message"):
             reply = message["reply_to_message"]
@@ -226,7 +243,10 @@ class Bot:
             if evidence["missing_media"] and result["verdict"] == "clean":
                 result = {
                     "verdict": "suspicious",
-                    "reason": "Media could not be inspected; human review needed.",
+                    "reason": (
+                        "Media inspection incomplete: "
+                        + "; ".join(evidence["missing_media"])
+                    )[:300],
                 }
         except APIError as exc:
             LOG.warning("Classification unavailable: %s", exc)

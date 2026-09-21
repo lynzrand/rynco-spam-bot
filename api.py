@@ -63,32 +63,38 @@ class Telegram:
             )
         return result["result"]
 
-    def image(self, file_id):
+    def download(self, file_id, limit=20 * 1024 * 1024):
         """Download locally; never expose the token-bearing file URL to the model."""
-        limit = 8 * 1024 * 1024
         file = self.call("getFile", file_id=file_id)
         if file.get("file_size", 0) > limit:
-            raise APIError("Image too large")
+            raise APIError("Media exceeds download limit")
         try:
             with urllib.request.urlopen(
                 self.file_root + file["file_path"], timeout=30
             ) as response:
                 data = response.read(limit + 1)
         except OSError:
-            raise APIError("Telegram image download") from None
+            raise APIError("Telegram media download") from None
         if len(data) > limit:
-            raise APIError("Image too large")
-        if data.startswith(b"\xff\xd8\xff"):
-            mime = "image/jpeg"
-        elif data.startswith(b"\x89PNG\r\n\x1a\n"):
-            mime = "image/png"
-        elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-            mime = "image/webp"
-        elif data.startswith((b"GIF87a", b"GIF89a")):
-            mime = "image/gif"
-        else:
-            raise APIError("Unsupported image")
-        return f"data:{mime};base64," + base64.b64encode(data).decode()
+            raise APIError("Media exceeds download limit")
+        return data
+
+    def image(self, file_id):
+        return image_data(self.download(file_id, 8 * 1024 * 1024))
+
+
+def image_data(data):
+    if data.startswith(b"\xff\xd8\xff"):
+        mime = "image/jpeg"
+    elif data.startswith(b"\x89PNG\r\n\x1a\n"):
+        mime = "image/png"
+    elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        mime = "image/webp"
+    elif data.startswith((b"GIF87a", b"GIF89a")):
+        mime = "image/gif"
+    else:
+        raise APIError("Unsupported image")
+    return f"data:{mime};base64," + base64.b64encode(data).decode()
 
 
 class Classifier:
