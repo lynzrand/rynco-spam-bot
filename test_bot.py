@@ -551,6 +551,7 @@ class ClassifierTests(unittest.TestCase):
             )
             payload = request.call_args.args[1]
             self.assertEqual(payload["model"], "test-model")
+            self.assertEqual(payload["reasoning_effort"], "low")
             self.assertEqual(
                 payload["messages"][-1]["content"][-1]["image_url"]["url"],
                 "data:image/png;base64,test",
