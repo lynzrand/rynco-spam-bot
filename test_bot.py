@@ -481,10 +481,18 @@ class BotTests(unittest.TestCase):
         self.assertEqual(self.case()["phase"], "review")
         self.assertFalse(self.tg.calls_for("banChatMember"))
 
-    def test_unreadable_media_cannot_silently_pass(self):
+    def test_unreadable_media_passes_without_spam_evidence(self):
         self.tg.failures["image"] = APIError("Image")
+        # Unavailable images alone must not trigger a moderation vote.
         self.send(photo=[{"file_id": "bad"}])
-        self.assertEqual(self.case()["phase"], "review")
+        self.assertIsNone(self.case())
+        self.assertTrue(self.model.calls[0][0]["missing_media"])
+
+    def test_unreadable_media_does_not_override_spam_evidence(self):
+        self.tg.failures["image"] = APIError("Image")
+        self.model.verdict = "spam"
+        self.send(photo=[{"file_id": "bad"}], caption="看我简介")
+        self.assertEqual(self.case()["phase"], "banned")
 
     def test_readable_sticker_does_not_create_unreadable_media_review(self):
         # Regression for the real group report: all stickers used to be marked missing.
