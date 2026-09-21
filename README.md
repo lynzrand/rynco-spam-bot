@@ -5,6 +5,8 @@ Chat Completions endpoint, and SQLite. No third-party Python packages or contain
 are required. Media extraction uses FFmpeg, Poppler, and whisper.cpp.
 The configured provider is **DeepSeek 4.1 Flash on OpenCode Go**:
 `https://opencode.ai/zen/go/v1`, model `deepseek-flash`.
+Classifier requests explicitly set `reasoning_effort: low`, using DeepSeek's
+[documented thinking control](https://api-docs.deepseek.com/guides/thinking_mode/).
 
 ## Run
 

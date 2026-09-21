@@ -116,6 +116,7 @@ class Classifier:
             self.url,
             {
                 "model": self.model,
+                "reasoning_effort": "low",
                 "messages": [
                     {"role": "system", "content": self.prompt},
                     {"role": "system", "content": "Group context: " + self.context},
