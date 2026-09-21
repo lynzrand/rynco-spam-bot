@@ -1,0 +1,21 @@
+[Unit]
+Description=Telegram spam moderation bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/claw/projects/rynco-spam-bot
+EnvironmentFile=/home/claw/projects/rynco-spam-bot/.env
+Environment=http_proxy=http://127.0.0.1:20171
+Environment=https_proxy=http://127.0.0.1:20171
+ExecStart=/run/current-system/sw/bin/python3 /home/claw/projects/rynco-spam-bot/bot.py
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGINT
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
