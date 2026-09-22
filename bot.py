@@ -312,41 +312,33 @@ class Bot:
             elif edited:
                 evidence["event"] = "edited_message"
             result = self.classifier.classify(evidence, images)
-            # Code-level guardrails: the model cannot authorize these on its own.
+            basis = result.get("basis")
+            # Code-level guardrails: only solicitation in the sender's own message can
+            # authorize an automatic ban. Profile-carried evidence, unreadable content,
+            # and a missing verdict marker all cap the case at a member vote instead.
             profile_only = reaction is not None or event == "join"
-            if result["verdict"] == "spam" and profile_only:
-                downgrade = "profile-only"
+            if result["verdict"] == "spam" and (profile_only or basis != "message"):
+                downgrade = (
+                    "profile-only" if profile_only else f"basis={basis or 'missing'}"
+                )
                 result = {
                     "verdict": "suspicious",
                     "reason": (
-                        "Profile-only evidence cannot justify an automatic ban; human "
-                        "review needed. " + result["reason"]
+                        "An automatic ban needs solicitation in the sender's own "
+                        "message; this evidence only flags a vote. " + result["reason"]
                     )[:300],
                 }
             # An inspection gap is not evidence: content nobody could fetch or decode
-            # must not open a review, and must never justify a ban.
-            elif missing_media:
-                if (
-                    result["verdict"] == "spam"
-                    and result.get("basis") == "uninspectable"
-                ):
-                    downgrade = "uninspectable"
-                    result = {
-                        "verdict": "suspicious",
-                        "reason": (
-                            "No inspectable evidence for a ban; review needed. "
-                            + result["reason"]
-                        )[:300],
-                    }
-                elif result["verdict"] == "suspicious":
-                    downgrade = "uninspectable"
-                    result = {
-                        "verdict": "clean",
-                        "reason": (
-                            "Inspection gap treated as neutral, no visible indicator: "
-                            + result["reason"]
-                        )[:300],
-                    }
+            # must not open a review either.
+            elif result["verdict"] == "suspicious" and missing_media:
+                downgrade = "uninspectable"
+                result = {
+                    "verdict": "clean",
+                    "reason": (
+                        "Inspection gap treated as neutral, no visible indicator: "
+                        + result["reason"]
+                    )[:300],
+                }
         except APIError as exc:
             # A transient provider failure is not evidence either: pass rather than
             # open a review the members cannot act on, and leave the reason in the log.

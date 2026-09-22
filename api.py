@@ -143,16 +143,17 @@ class Classifier:
                 or not 1 <= len(verdict["reason"]) <= 300
             ):
                 raise ValueError("Invalid classification")
+            basis = verdict.get("basis")
+            # A missing or unexpected marker must never fail the response; it only
+            # loses the model the permission to authorize a ban (see Bot.observe).
+            if not isinstance(basis, str) or not basis.strip():
+                basis = ""
+            else:
+                basis = " ".join(basis.split())[:24]
             return {
                 "verdict": verdict["verdict"],
                 "reason": verdict["reason"],
-                # Only the exact marker for an inspection gap relaxes a verdict, so an
-                # unexpected value can never fail the response (that would review spam).
-                "basis": (
-                    "uninspectable"
-                    if verdict.get("basis") == "uninspectable"
-                    else "visible"
-                ),
+                "basis": basis,
             }
         except (KeyError, IndexError, TypeError, ValueError):
             raise APIError("Invalid classifier response") from None
