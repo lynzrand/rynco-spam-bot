@@ -76,11 +76,21 @@ and Chat Completions responses. There is no silent fallback to another paid prov
   in the prompt but cannot justify a flag alone. Download photos locally (8 MiB maximum
   each; other attachments up to 20 MiB) and send base64
   data; the model provider never receives Telegram token-bearing download URLs.
-- **Spam:** the classifier's verdict must rest on content the sender posted here (its
-  `basis` is `message`); a verdict resting on the profile, on unreadable content, or with
-  a missing `basis` is capped at **Suspicious** by code, whatever the model says. For a
-  spam verdict the bot persists the decision, bans with the appropriate user/sender-chat
-  method, and deletes messages. User bans request server-side history revocation. Sender-chat
+- **Deletions are limited to the last ten minutes** (`DELETE_WINDOW`): a ban never passes
+  `revoke_messages` (that would wipe the user's whole history in the group) and the bot deletes only
+  observed messages sent within the window, logging how many older ones it kept. A case escalated to a
+  ban long after the message was posted therefore deletes nothing. A ban also removes that identity's
+  reactions using Telegram's `deleteAllMessageReactions` (up to 10000), never the innocent
+  reacted-to messages; that call has no time filter.
+- **Spam:** the classifier's verdict must clear the code's own evidence gate: **solicitation in the
+  sender's own message** (`basis` is `message` — text, caption, entities, or attached media, images
+  included) bans at once, and a profile-carried verdict (`basis` is `profile`) needs **two independent
+  profile signals** verified by the bot — a stated solicitation (funnel or offer wording), a contact
+  channel (link, handle, phone, QR), and a price or commercial name (each class counts once, however many
+  tokens it matches). Anything else — one profile signal, a missing or unexpected `basis` — is capped at
+  **Suspicious** whatever the model says. Reactions and joins have no message content, so they always take
+  the profile path. For a spam verdict the bot persists the decision, bans with the appropriate
+  user/sender-chat method, and deletes messages. Sender-chat
   bans require deleting observed messages individually. Post a ban notice with a
   **not spam** member-vote button and an **undo (moderator)** button that last
   5 hours from posting. Three distinct current members voting **not spam** within
