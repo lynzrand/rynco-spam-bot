@@ -60,7 +60,10 @@ and Chat Completions responses. There is no silent fallback to another paid prov
   for reactions after 10 checked original messages with no unresolved moderation
   case, or through explicit exemption. Reaction removals and anonymous aggregate
   counts are ignored. Telegram must expose `user` or `actor_chat`; the underlying
-  post's author is never treated as the reactor. This is separate from review-button
+  post's author is never treated as the reactor. Reactions to the bot's own review
+  and ban notices are ignored entirely because they are moderation UI. Profile-only
+  evidence on reactions and joins can only reach human review, never an automatic
+  ban, even if the classifier returns spam. This is separate from review-button
   voting. A ban also removes that identity's recent reactions using Telegram's
   `deleteAllMessageReactions` (up to 10000), never the innocent reacted-to messages.
 - Prefer `sender_chat` over Telegram's placeholder `from` user. Channel identities
@@ -75,15 +78,21 @@ and Chat Completions responses. There is no silent fallback to another paid prov
 - **Spam:** persist the decision, ban with the appropriate user/sender-chat method,
   and delete messages. User bans request server-side history revocation. Sender-chat
   bans require deleting observed messages individually. Post a ban notice with a
-  **not spam** button that lasts 5 hours from posting.
+  **not spam** member-vote button and an **undo (moderator)** button that last
+  5 hours from posting. Three distinct current members voting **not spam** within
+  that window unban and permanently exempt the identity, using the same restoration
+  path as moderator undo. Two votes are insufficient. Votes are immutable, with no
+  self-votes or forwarded/cross-chat buttons; spam votes on a ban notice are rejected.
 - **Suspicious:** post **spam / not spam** buttons. The first side to reach **three
   distinct current group members** wins. One immutable vote per person; no self-votes
   or forwarded/cross-chat buttons. A not-spam vote closes that case without exempting
   the remaining initial messages. Pending reviews have no time limit. New clear spam
-  evidence can supersede an unresolved review.
+  evidence can supersede an unresolved review; that escalation clears existing
+  review votes so they cannot count toward unbanning the escalated case.
 - **Undo:** one click by the group owner or an administrator with ban permissions
-  unbans and permanently exempts that identity **in this group**. Ordinary members
-  cannot undo bans. Exemption is saved only after the unban succeeds. The person may
+  on **undo (moderator)** within the same 5-hour window unbans and permanently exempts
+  that identity **in this group**. Ordinary members use the three-vote **not spam**
+  path instead. Exemption is saved only after the unban succeeds. The person may
   rejoin; Telegram cannot restore deleted messages. A sender-chat exemption cannot
   identify or exempt its hidden owner or the owner's other channels.
 - Classifier errors or invalid model output go to human review, never an automatic
