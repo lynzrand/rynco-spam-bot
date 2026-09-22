@@ -63,15 +63,23 @@ def main():
             [("Message image", color_swatch())],
             {},
         ),
-        # Regression: profile funnels and advertising accounts must not go to a vote.
-        ("Profile funnel without bio", "看我简介", "spam", [], {}),
-        ("Profile funnel in name", "你好", "spam", [], {"first_name": "看我简介"}),
+        # Regression: a profile funnel with no stated offer is a member vote, and an
+        # automatic ban needs solicitation in the sender's own message.
+        ("Profile funnel without bio", "看我简介", "suspicious", [], {}),
+        ("Profile funnel in name", "你好", "suspicious", [], {"first_name": "看我简介"}),
         (
             "Advertising account greeting",
             "大家好",
-            "spam",
+            "suspicious",
             [],
             {"description": "专业网站建设，承接企业官网和商城开发，需要的私聊报价。"},
+        ),
+        (
+            "Account selling message",
+            "出 ChatGPT Plus 账号 270 一个 需要的私聊",
+            "spam",
+            [],
+            {},
         ),
         (
             "Profile funnel warning",

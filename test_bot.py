@@ -50,7 +50,7 @@ class FakeClassifier:
     def __init__(self):
         self.verdict = "clean"
         self.reason = "Test evidence."
-        self.basis = None
+        self.basis = "message"
         self.calls = []
         self.error = None
 
@@ -278,7 +278,7 @@ class BotTests(unittest.TestCase):
         self.bot.update(self.reaction())
         self.bot.maintain()
         self.assertEqual(self.case()["phase"], "review")
-        self.assertIn("Profile-only evidence", self.case()["reason"])
+        self.assertIn("An automatic ban needs solicitation", self.case()["reason"])
         self.assertFalse(self.tg.calls_for("banChatMember"))
         self.assertFalse(self.tg.calls_for("deleteMessage"))
 
@@ -705,9 +705,29 @@ class BotTests(unittest.TestCase):
     def test_visible_spam_still_bans_despite_a_gap(self):
         self.uninspectable()
         self.model.verdict = "spam"
-        self.model.basis = "visible"
+        self.model.basis = "message"
         self.send()
         self.assertEqual(self.case()["phase"], "banned")
+
+    def test_profile_carried_spam_flags_instead_of_banning(self):
+        # A price or product word in a display name is not solicitation: an automatic
+        # ban requires the sender's own message to solicit.
+        self.model.verdict = "spam"
+        self.model.basis = "profile"
+        with self.assertLogs("spam-bot", level="INFO") as logs:
+            self.send()
+        self.assertEqual(self.case()["phase"], "review")
+        self.assertFalse(self.tg.calls_for("banChatMember"))
+        self.assertIn("basis=profile", logs.output[-1])
+
+    def test_missing_basis_never_bans(self):
+        self.model.verdict = "spam"
+        self.model.basis = None
+        with self.assertLogs("spam-bot", level="INFO") as logs:
+            self.send()
+        self.assertEqual(self.case()["phase"], "review")
+        self.assertFalse(self.tg.calls_for("banChatMember"))
+        self.assertIn("basis=missing", logs.output[-1])
 
     def test_inspection_gap_never_justifies_a_ban(self):
         self.uninspectable()
@@ -835,10 +855,11 @@ class ClassifierTests(unittest.TestCase):
             }
 
         for content, expected in (
-            ('{"verdict":"clean","reason":"x","basis":"uninspectable"}', "uninspectable"),
-            ('{"verdict":"clean","reason":"x"}', "visible"),
-            ('{"verdict":"clean","reason":"x","basis":"nonsense"}', "visible"),
-            ('{"verdict":"clean","reason":"x","basis":null}', "visible"),
+            ('{"verdict":"clean","reason":"x","basis":"profile"}', "profile"),
+            ('{"verdict":"clean","reason":"x"}', ""),
+            ('{"verdict":"clean","reason":"x","basis":"nonsense"}', "nonsense"),
+            ('{"verdict":"clean","reason":"x","basis":null}', ""),
+            ('{"verdict":"clean","reason":"x","basis":"  message "}', "message"),
         ):
             with self.subTest(content=content), patch(
                 "api.request_json", return_value=completion(content)
