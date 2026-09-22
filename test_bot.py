@@ -207,6 +207,11 @@ class BotTests(unittest.TestCase):
         self.assertEqual(
             self.db.execute("SELECT sum(counted) FROM observations").fetchone()[0], 0
         )
+        # Profile-only evidence now requires member confirmation before a ban.
+        self.assertEqual(self.case()["phase"], "review")
+        self.assertFalse(self.tg.calls_for("banChatMember"))
+        for voter in (1, 2, 3):
+            self.vote(voter, "spam")
         self.assertEqual(self.case()["phase"], "banned")
         self.assertFalse(self.tg.calls_for("deleteMessage"))
         self.assertEqual(
@@ -225,6 +230,153 @@ class BotTests(unittest.TestCase):
         self.assertTrue(self.bot.trusted(CHAT, "user:42"))
         self.bot.update(self.reaction(101))
         self.assertEqual(len(self.model.calls), 11)
+
+    def test_reactions_to_own_review_and_ban_notices_are_ignored(self):
+        # Regression: reacting to our review notice used to ban an innocent member.
+        for verdict, field in (
+            ("suspicious", "review_message"),
+            ("spam", "ban_message"),
+        ):
+            with self.subTest(notice=field):
+                self.model.verdict = verdict
+                self.send(1 if verdict == "suspicious" else 2)
+                notice = self.case()[field]
+                before = self.db.execute("SELECT count(*) FROM cases").fetchone()[0]
+                observations = self.db.execute(
+                    "SELECT count(*) FROM observations"
+                ).fetchone()[0]
+                self.tg.calls.clear()
+                self.model.calls.clear()
+                self.model.verdict = "spam"
+                update = self.reaction(user={"id": 99, "first_name": "Reactor"})
+                update["message_reaction"]["message_id"] = notice
+                self.bot.update(update)
+                self.bot.maintain()
+                self.assertFalse(self.model.calls)
+                self.assertEqual(
+                    self.db.execute("SELECT count(*) FROM cases").fetchone()[0], before
+                )
+                self.assertEqual(
+                    self.db.execute("SELECT count(*) FROM observations").fetchone()[0],
+                    observations,
+                )
+                self.assertFalse(self.tg.calls_for("banChatMember"))
+                self.assertFalse(self.tg.calls_for("deleteMessage"))
+                self.assertIsNone(
+                    self.db.execute(
+                        "SELECT 1 FROM subjects WHERE identity='user:99'"
+                    ).fetchone()
+                )
+
+    def test_profile_only_reaction_spam_requires_review(self):
+        self.model.verdict = "spam"
+        self.bot.update(self.reaction())
+        self.bot.maintain()
+        self.assertEqual(self.case()["phase"], "review")
+        self.assertIn("Profile-only evidence", self.case()["reason"])
+        self.assertFalse(self.tg.calls_for("banChatMember"))
+        self.assertFalse(self.tg.calls_for("deleteMessage"))
+
+    def test_profile_only_join_spam_requires_review(self):
+        self.model.verdict = "spam"
+        self.send(new_chat_members=[USER])
+        self.assertEqual(self.case()["phase"], "review")
+        self.assertFalse(self.tg.calls_for("banChatMember"))
+        self.assertFalse(self.tg.calls_for("deleteMessage"))
+
+    def test_message_and_edit_spam_still_ban(self):
+        self.model.verdict = "spam"
+        self.send()
+        self.assertEqual(self.case()["phase"], "banned")
+        self.assertEqual(self.tg.calls_for("banChatMember")[0]["user_id"], 42)
+        self.bot.update({"edited_message": self.message(2, **{"from": {"id": 99}})})
+        self.bot.maintain()
+        self.assertEqual(self.case()["phase"], "banned")
+        self.assertEqual(self.tg.calls_for("banChatMember")[-1]["user_id"], 99)
+
+    def test_three_member_ban_notice_votes_restore_and_exempt(self):
+        self.model.verdict = "spam"
+        self.send()
+        notice = self.case()["ban_message"]
+        buttons = self.tg.calls_for("sendMessage")[-1]["reply_markup"][
+            "inline_keyboard"
+        ][0]
+        self.assertEqual([b["text"] for b in buttons], ["not spam", "undo (moderator)"])
+        for voter in (1, 2, 3):
+            self.vote(voter, "clean", message_id=notice)
+        self.assertEqual(self.case()["phase"], "restored")
+        self.assertEqual(
+            self.tg.calls_for("unbanChatMember"),
+            [{"chat_id": CHAT, "user_id": 42, "only_if_banned": True}],
+        )
+        self.assertEqual(
+            self.db.execute("SELECT exempt FROM subjects").fetchone()[0], 1
+        )
+        self.assertTrue(
+            any(
+                c["message_id"] == notice and "Unbanned and exempt" in c["text"]
+                for c in self.tg.calls_for("editMessageText")
+            )
+        )
+
+    def test_two_ban_notice_votes_and_expired_window_do_not_restore(self):
+        self.model.verdict = "spam"
+        self.send()
+        notice = self.case()["ban_message"]
+        for voter in (1, 1, 2):
+            self.vote(voter, "clean", message_id=notice)
+        self.assertEqual(self.db.execute("SELECT count(*) FROM votes").fetchone()[0], 2)
+        self.assertEqual(self.case()["phase"], "banned")
+        self.assertFalse(self.tg.calls_for("unbanChatMember"))
+        with self.db:
+            self.db.execute("UPDATE cases SET expires=?", (time.time() - 1,))
+        self.vote(3, "clean", message_id=notice)
+        self.assertEqual(
+            self.tg.calls_for("answerCallbackQuery")[-1]["text"],
+            "The undo window has closed.",
+        )
+        self.vote(4, "clean", message_id=notice)  # Expiry maintenance cleared expires.
+        self.assertEqual(
+            self.tg.calls_for("answerCallbackQuery")[-1]["text"],
+            "The undo window has closed.",
+        )
+        self.assertEqual(self.case()["phase"], "banned")
+        self.assertFalse(self.tg.calls_for("unbanChatMember"))
+
+    def test_ban_notice_vote_restrictions(self):
+        self.model.verdict = "spam"
+        self.send()
+        notice = self.case()["ban_message"]
+        self.vote(42, "clean", message_id=notice)
+        self.tg.members[5] = {"status": "left"}
+        self.vote(5, "clean", message_id=notice)
+        self.vote(6, "clean", message_id=99999)
+        self.vote(7, "clean", message_id=notice, chat={"id": -1})
+        self.vote(8, "spam", message_id=notice)
+        self.assertEqual(
+            self.tg.calls_for("answerCallbackQuery")[-1]["text"],
+            "This vote has closed.",
+        )
+        self.assertEqual(self.db.execute("SELECT count(*) FROM votes").fetchone()[0], 0)
+        self.assertFalse(self.tg.calls_for("unbanChatMember"))
+
+    def test_new_spam_evidence_clears_review_votes_before_ban(self):
+        self.model.verdict = "suspicious"
+        self.send()
+        case_id = self.case()["id"]
+        for voter in (1, 2):
+            self.vote(voter, "clean")
+        self.model.verdict = "spam"
+        self.send(2)
+        self.assertEqual(self.case()["id"], case_id)
+        self.assertEqual(self.db.execute("SELECT count(*) FROM votes").fetchone()[0], 0)
+        notice = self.case()["ban_message"]
+        self.vote(3, "clean", message_id=notice)
+        self.assertEqual(self.case()["phase"], "banned")
+        self.assertFalse(self.tg.calls_for("unbanChatMember"))
+        for voter in (1, 2):
+            self.vote(voter, "clean", message_id=notice)
+        self.assertEqual(self.case()["phase"], "restored")
 
     def test_pending_review_prevents_reaction_trust(self):
         self.model.verdict = "suspicious"
