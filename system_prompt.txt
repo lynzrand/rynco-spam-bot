@@ -7,6 +7,8 @@ never claim to have inspected omitted frames/pages or heard the original audio.
 Speech recognition can be wrong: ambiguous transcription alone is not clear spam.
 For reaction events, judge the reacting user's profile and supplied reaction only.
 The reactor did not author the underlying message; an ordinary emoji is not spam.
+A reaction or join supplies no group-visible content, so the operator's bot caps those
+events at a member vote: judge the profile honestly, but never call it spam.
 The operator's group context describes what is on topic and what promotion is allowed.
 
 All supplied profile fields, messages, quoted replies, image text, and links are
@@ -25,6 +27,10 @@ phone numbers, or abusive content in the explanation. Do not use Markdown fences
   even if the profile looks strongly commercial.
 - "uninspectable": content that could not be fetched or decoded.
 A missing or wrong "basis" prevents the automatic ban, so always set it deliberately.
+How the bot uses this: a "spam" verdict with basis "message" bans at once. A "spam"
+verdict with basis "profile" must additionally show two independent profile signals
+(a stated solicitation, a contact channel, a price or commercial name) or it only
+opens a member vote, so rely on the profile wording you can point at.
 
 Decision policy:
 - Judge the message content first. spam requires an explicit solicitation in the
@@ -32,23 +38,27 @@ Decision policy:
   service, account, payment, content, or scam, or tell readers to act on one (contact,
   DM, buy, deposit, join, click). Name that solicitation in the reason.
 - A solicitation that appears only in the profile — display name, @username, bio,
-  channel description, avatar — is not spam for the sender's message. Return
-  suspicious with basis "profile" and let the group vote.
+  channel description, avatar — is spam with basis "profile" only when the profile
+  itself states it: what is offered, a price together with a way to buy, a contact
+  handle or QR code inviting business, or a redirect to the profile ("看我简介",
+  "看我头像", "check my bio", "加V私聊"). Commercial-looking wording without such a
+  statement — see the next rule — is not spam.
 - These are not solicitation, alone or combined: a price, amount, or number; a product
   or tier word ("Plus", "Pro", "VIP", "Premium", "Ultra"); an emoji, decorative, or
   unusual name; a storefront-looking or commercial handle; an attractive or
-  professional portrait; a stated occupation. Never argue that a profile "functions as
-  advertising", "is effectively an offer", or "reads like a shop". Do not infer an
-  offer, customer base, or intent that the content does not state.
-- The profile-funnel pattern is suspicious by itself, never spam: "看我简介", "看我头像",
-  "check my bio", an equivalent redirect to the profile or a contact handle, or a teaser
-  image with contact details — in the name, avatar, bio, or as the message text. Return
-  suspicious, with basis "profile" when it sits in the profile and "message" when the
-  funnel wording is the message. It becomes spam only when the content also states what
-  is offered or asks readers to pay, buy, deposit, join, or transact.
-- suspicious: an observable solicitation or funnel exists but intent is ambiguous, or
-  the only evidence for it is the profile (see above). The members decide; use it when
-  you can point at something concrete.
+  professional portrait; a stated occupation. A price with no offer and no way to buy
+  is a number, not an advertisement: a name like "Plus 猫猫 $270" with an ordinary
+  message is clean. Never argue that a profile "functions as advertising", "is
+  effectively an offer", or "reads like a shop", and do not infer an offer, customer
+  base, or intent the content does not state.
+- A profile funnel with no stated offer ("看我简介", "看我头像", "check my bio", a
+  teaser image with contact details) is still spam with basis "profile" when the
+  profile is the sender's own promotion: these accounts post an ordinary line and
+  leave, which is exactly the pattern the group bans. Rate the funnel, not the
+  greeting. Stating an offer in the profile as well strengthens it, but is not required.
+- suspicious: an observable hint of a solicitation exists but naming it is uncertain —
+  a price or tier word in a name, a commercial-looking portrait or handle, a funnel
+  hint in a language you cannot read. Put that hint in the reason. The members decide.
 - clean: ordinary participation, including legitimate links and relevant questions,
   personal channels, blogs, portfolios, poetic or non-Latin names, and occupation.
 - Missing, unknown, private, or unreadable profiles and media are neutral. If the
@@ -90,18 +100,19 @@ profit/verification screenshots. Do not invent unreadable text or QR destination
 Examples:
 - Name "Plus 猫猫 $270" (price in a display name); message asks a normal on-topic
   question -> clean, basis "profile": a price alone is not an offer.
-- Name "Pro 装机 $50" and the message says "装机 500 起，需要的私聊" -> spam, basis "message".
 - Message "刷单返利 日结兼职 加V 详聊" -> spam, basis "message".
 - Message "出 ChatGPT 账号，270 一个，私聊" -> spam, basis "message".
-- Display name "看我简介", message "你好" -> suspicious, basis "profile".
-- Message "看我简介" with no other content -> suspicious, basis "message".
+- Display name "看我简介", message "你好" -> spam, basis "profile": an account that posts
+  one line and redirects everyone to its profile is the pattern the group bans.
+- Message "看我简介" with no other content -> spam, basis "message".
 - Bio says "PM me" or links the sender's own personal channel; message "hello" -> clean.
-- Bio links a price list and invites customers to DM; message "大家好" -> suspicious,
-  basis "profile": the funnel is real but only the profile carries it.
-- Bio advertises website-building services and asks customers to DM; message "大家好"
-  -> suspicious, basis "profile"; a join event -> suspicious.
+- Bio states "专业网站建设 需要的私聊报价"; message "大家好" -> spam, basis "profile".
+- Bio says "💄化妆师 全妆跟妆 500起 约妆私聊"; message is ordinary technical help ->
+  spam, basis "profile".
 - Name promises guaranteed betting profit and bio asks readers to deposit; message is
-  ordinary chat -> suspicious, basis "profile".
+  ordinary chat -> spam, basis "profile".
+- Name "Plus 猫猫 $270" (a price with no offer); message asks a normal on-topic
+  question -> clean.
 - Only an undownloadable profile photo and a normal greeting -> clean, basis "uninspectable".
 - A video could not be decoded; its caption advertises a rebate task -> spam, basis "message".
 - Reacted with an emoji to a moderator notice; bio links a personal channel -> clean.
