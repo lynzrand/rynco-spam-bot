@@ -49,6 +49,8 @@ class FakeTelegram:
 class FakeClassifier:
     def __init__(self):
         self.verdict = "clean"
+        self.reason = "Test evidence."
+        self.basis = None
         self.calls = []
         self.error = None
 
@@ -56,7 +58,10 @@ class FakeClassifier:
         self.calls.append((evidence, images))
         if self.error:
             raise self.error
-        return {"verdict": self.verdict, "reason": "Test evidence."}
+        result = {"verdict": self.verdict, "reason": self.reason}
+        if self.basis:
+            result["basis"] = self.basis
+        return result
 
 
 class BotTests(unittest.TestCase):
@@ -635,8 +640,79 @@ class BotTests(unittest.TestCase):
         self.assertEqual(self.case()["phase"], "clean")
         self.assertFalse(self.tg.calls_for("banChatMember"))
 
-    def test_classifier_failure_goes_to_review(self):
+    def test_classifier_failure_passes_as_clean(self):
+        # A provider outage is not evidence: it passes silently, in the log only.
         self.model.error = APIError("Classifier", 503)
+        with self.assertLogs("spam-bot", level="INFO") as logs:
+            self.send()
+        self.assertIsNone(self.case())
+        self.assertFalse(self.tg.calls_for("sendMessage"))
+        self.assertFalse(self.tg.calls_for("banChatMember"))
+        self.assertIn("verdict=clean (unavailable)", logs.output[-1])
+
+    def test_every_decision_is_logged(self):
+        with self.assertLogs("spam-bot", level="INFO") as logs:
+            self.send()
+        line = logs.output[-1]
+        self.assertIn("Decision case=-", line)
+        self.assertIn("identity=user:42", line)
+        self.assertIn("event=1", line)
+        self.assertIn("verdict=clean", line)
+        self.assertIn("media=-", line)
+        self.assertIn("reason=Test evidence.", line)
+
+    def test_profile_only_downgrade_is_logged(self):
+        self.model.verdict = "spam"
+        with self.assertLogs("spam-bot", level="INFO") as logs:
+            self.bot.update(self.reaction())
+        line = logs.output[-1]
+        self.assertIn("event=reaction:900:100", line)
+        self.assertIn("verdict=suspicious (profile-only)", line)
+        self.assertIn("case=1", line)
+
+    def uninspectable(self):
+        """A visible profile photo that will not download leaves an inspection gap."""
+        self.tg.photos = [[{"file_id": "photo"}]]
+        self.tg.failures["image"] = APIError("Telegram", 400)
+
+    def test_inspection_gap_passes_instead_of_opening_a_review(self):
+        self.uninspectable()
+        self.model.verdict = "suspicious"
+        self.model.basis = "uninspectable"
+        with self.assertLogs("spam-bot", level="INFO") as logs:
+            self.send()
+        self.assertIsNone(self.case())
+        self.assertFalse(self.tg.calls_for("sendMessage"))
+        self.assertIn("verdict=clean (uninspectable)", logs.output[-1])
+        self.assertIn("media=profile image unavailable", logs.output[-1])
+
+    def test_uninspectable_basis_without_a_gap_still_reviews(self):
+        self.model.verdict = "suspicious"
+        self.model.basis = "uninspectable"
+        self.send()
+        self.assertEqual(self.case()["phase"], "review")
+
+    def test_any_suspicion_alongside_a_gap_passes(self):
+        # The model claiming a visible indicator does not override an inspection gap:
+        # a review notice costs the group a vote, a missed hunch does not.
+        self.uninspectable()
+        self.model.verdict = "suspicious"
+        self.model.basis = "visible"
+        self.send()
+        self.assertIsNone(self.case())
+        self.assertFalse(self.tg.calls_for("sendMessage"))
+
+    def test_visible_spam_still_bans_despite_a_gap(self):
+        self.uninspectable()
+        self.model.verdict = "spam"
+        self.model.basis = "visible"
+        self.send()
+        self.assertEqual(self.case()["phase"], "banned")
+
+    def test_inspection_gap_never_justifies_a_ban(self):
+        self.uninspectable()
+        self.model.verdict = "spam"
+        self.model.basis = "uninspectable"
         self.send()
         self.assertEqual(self.case()["phase"], "review")
         self.assertFalse(self.tg.calls_for("banChatMember"))
@@ -746,6 +822,28 @@ class ClassifierTests(unittest.TestCase):
             ):
                 with self.assertRaises(APIError):
                     client.classify({}, [])
+
+
+    def test_basis_is_normalized_and_never_fails_the_response(self):
+        client = Classifier("https://example.invalid/v1", "test", "test", "test")
+
+        def completion(content):
+            return {
+                "choices": [
+                    {"finish_reason": "stop", "message": {"content": content}}
+                ]
+            }
+
+        for content, expected in (
+            ('{"verdict":"clean","reason":"x","basis":"uninspectable"}', "uninspectable"),
+            ('{"verdict":"clean","reason":"x"}', "visible"),
+            ('{"verdict":"clean","reason":"x","basis":"nonsense"}', "visible"),
+            ('{"verdict":"clean","reason":"x","basis":null}', "visible"),
+        ):
+            with self.subTest(content=content), patch(
+                "api.request_json", return_value=completion(content)
+            ):
+                self.assertEqual(client.classify({}, [])["basis"], expected)
 
 
 if __name__ == "__main__":
