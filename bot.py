@@ -101,6 +101,16 @@ class Bot:
     def member(self, chat, user):
         return self.tg.call("getChatMember", chat_id=chat, user_id=user)
 
+    def own_notice(self, chat, message):
+        """The bot's notice messages are moderation UI, not member content."""
+        return (
+            self.db.execute(
+                "SELECT 1 FROM cases WHERE chat=? AND (review_message=? OR ban_message=?) LIMIT 1",
+                (chat, message, message),
+            ).fetchone()
+            is not None
+        )
+
     def evidence(self, subject, sender, message):
         kind, target = subject.split(":")
         profile = {
@@ -299,6 +309,16 @@ class Bot:
             elif edited:
                 evidence["event"] = "edited_message"
             result = self.classifier.classify(evidence, images)
+            # Code-level guardrail: the model cannot authorize profile-only bans.
+            profile_only = reaction is not None or event == "join"
+            if result["verdict"] == "spam" and profile_only:
+                result = {
+                    "verdict": "suspicious",
+                    "reason": (
+                        "Profile-only evidence cannot justify an automatic ban; human "
+                        "review needed. " + result["reason"]
+                    )[:300],
+                }
         except APIError as exc:
             LOG.warning("Classification unavailable: %s", exc)
             result = {
@@ -313,6 +333,8 @@ class Bot:
             if result["verdict"] != "clean":
                 phase = "ban" if result["verdict"] == "spam" else "review"
                 if active and phase == "ban":
+                    # Review votes must not count toward undoing new spam evidence.
+                    self.db.execute("DELETE FROM votes WHERE case_id=?", (active[0],))
                     self.db.execute(
                         "UPDATE cases SET phase='ban',reason=?,dirty=1 WHERE id=?",
                         (result["reason"], active[0]),
@@ -353,6 +375,8 @@ class Bot:
                 for item in reaction["new_reaction"]
             ):
                 return
+            if self.own_notice(chat, reaction["message_id"]):
+                return  # Reactions to moderation UI are not member content.
             actor = identity(
                 {
                     "chat": reaction["chat"],
@@ -431,7 +455,13 @@ class Bot:
         message = query.get("message", {})
         choice = parts[2]
         expected = (
-            case["ban_message" if choice == "undo" else "review_message"]
+            case[
+                (
+                    "ban_message"
+                    if choice == "undo" or case["phase"] == "banned"
+                    else "review_message"
+                )
+            ]
             if case
             else None
         )
@@ -475,8 +505,15 @@ class Bot:
         if not is_member(membership):
             answer("Only current group members can vote.")
             return
-        if case["phase"] != "review":
+        if case["phase"] != "review" and not (
+            case["phase"] == "banned" and choice == "clean"
+        ):
             answer("This vote has closed.")
+            return
+        if case["phase"] == "banned" and (
+            not case["expires"] or case["expires"] <= time.time()
+        ):
+            answer("The undo window has closed.")
             return
         with self.db:
             inserted = self.db.execute(
@@ -487,7 +524,13 @@ class Bot:
                 "SELECT count(*) FROM votes WHERE case_id=? AND choice=?",
                 (case["id"], choice),
             ).fetchone()[0]
-            phase = ("ban" if choice == "spam" else "clean") if count >= 3 else "review"
+            phase = case["phase"]
+            if count >= 3:
+                phase = (
+                    "restore"
+                    if case["phase"] == "banned"
+                    else "ban" if choice == "spam" else "clean"
+                )
             self.db.execute(
                 "UPDATE cases SET phase=?,dirty=1,retry_at=0 WHERE id=?",
                 (phase, case["id"]),
@@ -610,8 +653,8 @@ class Bot:
             if phase == "banned" and not case["ban_message"]:
                 self.notice(
                     case,
-                    f"Banned for spam: {label}\n{case['reason']}\nA moderator can select not spam within {UNDO_WINDOW // 3600} hours to unban and exempt this identity. Deleted messages cannot be restored.",
-                    [[button("not spam", "undo")]],
+                    f"Banned for spam: {label}\n{case['reason']}\nA moderator can select undo within {UNDO_WINDOW // 3600} hours to unban and exempt this identity; three member votes for not spam do the same. Deleted messages cannot be restored.",
+                    [[button("not spam", "clean"), button("undo (moderator)", "undo")]],
                     "ban_message",
                 )
             if phase == "restored" and case["ban_message"] and case["dirty"]:
