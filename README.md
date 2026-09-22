@@ -95,12 +95,20 @@ and Chat Completions responses. There is no silent fallback to another paid prov
   path instead. Exemption is saved only after the unban succeeds. The person may
   rejoin; Telegram cannot restore deleted messages. A sender-chat exemption cannot
   identify or exempt its hidden owner or the owner's other channels.
-- Classifier errors or invalid model output go to human review, never an automatic
-  ban based on the error alone. Unknown profiles and unreadable/unsupported media
-  pass when available evidence shows no spam. Inspection failures identify the
+- Classifier errors or invalid model output pass as clean instead of opening a review
+  (a provider outage is not evidence, and members cannot act on it); the log carries
+  the reason. Unknown profiles and unreadable/unsupported media pass when available
+  evidence shows no spam, and a suspicious verdict reached alongside any inspection
+  gap passes too: the bot does not open a review for content nobody could see.
+  Inspection failures identify the
   media type and failing decoder;
   logs omit media contents and credentials. Profile metadata unavailable through
   Telegram remains unknown.
+- Every classification is logged as one line — `case=`, `chat=`, `identity=`, `event=`,
+  `verdict=` (with the code-level downgrade in parentheses when one applied),
+  `media=` (the inspection gaps) and the model's `reason=`. That line is the only
+  record of a clean decision and of why a review was opened; the update payload and the
+  evidence themselves are not stored.
 
 ## Media inspection
 
