@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from api import APIError, Classifier
-from bot import Bot, database, identity
+from bot import UNDO_WINDOW, Bot, database, identity
 
 CHAT = -100123
 USER = {"id": 42, "first_name": "Example"}
@@ -378,7 +378,15 @@ class BotTests(unittest.TestCase):
         self.model.verdict = "spam"
         self.send()
         notice = self.case()["ban_message"]
-        self.assertAlmostEqual(self.case()["expires"], time.time() + 1800, delta=2)
+        self.assertTrue(
+            any(
+                f"within {UNDO_WINDOW // 3600} hours" in call["text"]
+                for call in self.tg.calls_for("sendMessage")
+            )
+        )
+        self.assertAlmostEqual(
+            self.case()["expires"], time.time() + UNDO_WINDOW, delta=2
+        )
         with self.db:
             self.db.execute("UPDATE cases SET expires=?", (time.time() - 1,))
         self.db.close()
