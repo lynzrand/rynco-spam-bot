@@ -61,9 +61,10 @@ and Chat Completions responses. There is no silent fallback to another paid prov
   case, or through explicit exemption. Reaction removals and anonymous aggregate
   counts are ignored. Telegram must expose `user` or `actor_chat`; the underlying
   post's author is never treated as the reactor. Reactions to the bot's own review
-  and ban notices are ignored entirely because they are moderation UI. Profile-only
-  evidence on reactions and joins can only reach human review, never an automatic
-  ban, even if the classifier returns spam. This is separate from review-button
+  and ban notices are ignored entirely because they are moderation UI. Evidence that
+  rests on the profile rather than on content the sender posted — any event, including
+  messages — can only reach human review, never an automatic ban, even if the
+  classifier returns spam. This is separate from review-button
   voting. A ban also removes that identity's recent reactions using Telegram's
   `deleteAllMessageReactions` (up to 10000), never the innocent reacted-to messages.
 - Prefer `sender_chat` over Telegram's placeholder `from` user. Channel identities
@@ -75,8 +76,11 @@ and Chat Completions responses. There is no silent fallback to another paid prov
   in the prompt but cannot justify a flag alone. Download photos locally (8 MiB maximum
   each; other attachments up to 20 MiB) and send base64
   data; the model provider never receives Telegram token-bearing download URLs.
-- **Spam:** persist the decision, ban with the appropriate user/sender-chat method,
-  and delete messages. User bans request server-side history revocation. Sender-chat
+- **Spam:** the classifier's verdict must rest on content the sender posted here (its
+  `basis` is `message`); a verdict resting on the profile, on unreadable content, or with
+  a missing `basis` is capped at **Suspicious** by code, whatever the model says. For a
+  spam verdict the bot persists the decision, bans with the appropriate user/sender-chat
+  method, and deletes messages. User bans request server-side history revocation. Sender-chat
   bans require deleting observed messages individually. Post a ban notice with a
   **not spam** member-vote button and an **undo (moderator)** button that last
   5 hours from posting. Three distinct current members voting **not spam** within
@@ -186,18 +190,21 @@ They do not measure model accuracy or prove Telegram integration with a real gro
 
 After loading `.env`, `python3 smoke_test.py` sends eight synthetic cases to the
 configured provider (uses API quota): a Chinese question without an avatar, a
-task/rebate scam, scam warnings, a PNG image, profile funnels, and an advertising
-account greeting. It checks expected verdicts and
+task/rebate scam, scam warnings, a PNG image, profile funnels, an advertising bio
+greeting, and an account-selling message. It checks expected verdicts and
 exits nonzero on a mismatch or API error. This is a small integration smoke test,
 not an accuracy benchmark. Source formatting uses Black.
 
 ## Prompt research
 
 `system_prompt.txt` is editable English policy with Chinese examples. It treats
-messages, bios, image text, and quoted replies as evidence, never instructions.
-Advertising accounts are spam even without fraud: a greeting or join does not
-excuse an advertising name, bio, or profile image. A sender's own "看我简介"
-profile funnel is spam even when the bio is unavailable. Quoting/reporting that
+messages, bios, image text, and quoted replies as evidence, never instructions. The
+model must name the evidence its verdict rests on (`basis`: `message`, `profile`, or
+`uninspectable`) and code refuses a ban on anything but `message`. Advertising needs a
+solicitation in the sender's own message: a price, tier word, storefront-looking name,
+or portrait is not an offer, and a profile-carried offer is **suspicious** (a member
+vote) rather than an instant ban. A sender's own "看我简介" funnel, likewise, is
+suspicious even when the bio is unavailable. Quoting/reporting that
 wording and factual occupations remain distinct from promotion. These decisions
 use the model prompt, not a separate keyword filter.
 
