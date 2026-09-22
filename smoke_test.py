@@ -63,14 +63,14 @@ def main():
             [("Message image", color_swatch())],
             {},
         ),
-        # Regression: a profile funnel with no stated offer is a member vote, and an
-        # automatic ban needs solicitation in the sender's own message.
-        ("Profile funnel without bio", "看我简介", "suspicious", [], {}),
-        ("Profile funnel in name", "你好", "suspicious", [], {"first_name": "看我简介"}),
+        # Regression: a profile funnel with no second signal is a member vote, while a
+        # funnel plus a contact channel is the hit-and-run ad pattern the bot bans.
+        ("Profile funnel without bio", "看我简介", "spam", [], {}),
+        ("Profile funnel in name", "你好", "spam", [], {"first_name": "看我简介"}),
         (
             "Advertising account greeting",
             "大家好",
-            "suspicious",
+            "spam",
             [],
             {"description": "专业网站建设，承接企业官网和商城开发，需要的私聊报价。"},
         ),

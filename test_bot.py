@@ -21,6 +21,7 @@ class FakeTelegram:
         self.failures = {}
         self.sequence = 1000
         self.photos = []
+        self.chat = {"description": "Discussion", "type": "supergroup"}
 
     def call(self, method, **params):
         self.calls.append((method, params))
@@ -29,7 +30,7 @@ class FakeTelegram:
         if method == "getChatMember":
             return self.members.get(params["user_id"], {"status": "member"})
         if method == "getChat":
-            return {"description": "Discussion", "type": "supergroup"}
+            return dict(self.chat)
         if method == "getUserProfilePhotos":
             return {"photos": self.photos}
         if method == "sendMessage":
@@ -281,7 +282,6 @@ class BotTests(unittest.TestCase):
         self.assertIn("An automatic ban needs solicitation", self.case()["reason"])
         self.assertFalse(self.tg.calls_for("banChatMember"))
         self.assertFalse(self.tg.calls_for("deleteMessage"))
-
     def test_profile_only_join_spam_requires_review(self):
         self.model.verdict = "spam"
         self.send(new_chat_members=[USER])
@@ -482,7 +482,8 @@ class BotTests(unittest.TestCase):
         self.vote(5, "clean")
         self.assertEqual(self.case()["phase"], "banned")
         self.assertEqual(self.db.execute("SELECT count(*) FROM votes").fetchone()[0], 4)
-        self.assertTrue(self.tg.calls_for("banChatMember")[0]["revoke_messages"])
+        # A ban must not revoke the user's server-side history.
+        self.assertNotIn("revoke_messages", self.tg.calls_for("banChatMember")[0])
 
     def test_clean_wins_without_ban_but_does_not_exempt_future_spam(self):
         self.model.verdict = "suspicious"
@@ -667,7 +668,7 @@ class BotTests(unittest.TestCase):
             self.bot.update(self.reaction())
         line = logs.output[-1]
         self.assertIn("event=reaction:900:100", line)
-        self.assertIn("verdict=suspicious (profile-only)", line)
+        self.assertIn("verdict=suspicious (profile-factors=0)", line)
         self.assertIn("case=1", line)
 
     def uninspectable(self):
@@ -710,15 +711,97 @@ class BotTests(unittest.TestCase):
         self.assertEqual(self.case()["phase"], "banned")
 
     def test_profile_carried_spam_flags_instead_of_banning(self):
-        # A price or product word in a display name is not solicitation: an automatic
-        # ban requires the sender's own message to solicit.
+        # Case 9 (2026-09-22): the display name "Plus 猫猫⛻ $270" plus an ordinary message
+        # was banned on the inference that a price makes the profile an advertisement.
+        # One commercial-looking signal is not enough for a ban.
         self.model.verdict = "spam"
         self.model.basis = "profile"
         with self.assertLogs("spam-bot", level="INFO") as logs:
-            self.send()
+            self.send(
+                **{"from": {"id": 42, "first_name": "Plus 猫猫⛻", "last_name": "$270"}}
+            )
         self.assertEqual(self.case()["phase"], "review")
         self.assertFalse(self.tg.calls_for("banChatMember"))
-        self.assertIn("basis=profile", logs.output[-1])
+        self.assertIn("profile-factors=1", logs.output[-1])
+
+    def test_two_profile_factors_ban(self):
+        # A stated solicitation plus a contact channel is the hit-and-run ad pattern.
+        self.model.verdict = "spam"
+        self.model.basis = "profile"
+        self.tg.chat["description"] = "看我简介"
+        self.send(
+            **{"from": {"id": 42, "first_name": "Example", "username": "t.me/shop"}}
+        )
+        self.assertEqual(self.case()["phase"], "banned")
+        self.assertTrue(self.tg.calls_for("banChatMember"))
+
+    def test_profile_solicitation_without_a_second_factor_reviews(self):
+        self.model.verdict = "spam"
+        self.model.basis = "profile"
+        self.send(**{"from": {"id": 42, "first_name": "看我简介"}})
+        self.assertEqual(self.case()["phase"], "review")
+        self.assertFalse(self.tg.calls_for("banChatMember"))
+
+    def test_ban_deletes_only_recent_messages(self):
+        self.model.verdict = "spam"
+        with self.db:
+            self.db.execute(
+                "INSERT INTO observations(chat,identity,event,message,sent,counted) VALUES (?,?,?,?,?,?)",
+                (CHAT, "user:42", "old", 9998, time.time() - 3600, 1),
+            )
+        with self.assertLogs("spam-bot", level="INFO") as logs:
+            self.send()
+        self.assertEqual(self.case()["phase"], "banned")
+        self.assertEqual(
+            [call["message_id"] for call in self.tg.calls_for("deleteMessage")], [1]
+        )
+        self.assertTrue(
+            any("Kept 1 older message" in line for line in logs.output), logs.output
+        )
+
+    def test_profile_factors_count_each_class_once(self):
+        from bot import profile_factors
+
+        self.assertEqual(
+            profile_factors({"first_name": "Plus 猫猫", "last_name": "$270"}),
+            {"commercial"},
+        )
+        self.assertEqual(
+            profile_factors({"description": "看我简介 详情看简介"}), {"funnel"}
+        )
+        self.assertEqual(
+            profile_factors({"description": "全妆跟妆 500 元 约妆私聊"}),
+            {"commercial", "contact"},
+        )
+        self.assertEqual(profile_factors({"first_name": "野花"}), set())
+
+    def test_offer_plus_contact_bans(self):
+        self.model.verdict = "spam"
+        self.model.basis = "profile"
+        self.tg.chat["description"] = "出账号 270一个 需要私聊"
+        self.send()
+        self.assertEqual(self.case()["phase"], "banned")
+
+    def test_spam_from_sender_chat_deletes_only_recent_messages(self):
+        # Sender chats have no server-side revocation, so the window is their only rule.
+        self.model.verdict = "spam"
+        with self.db:
+            self.db.execute(
+                "INSERT INTO observations(chat,identity,event,message,sent,counted) VALUES (?,?,?,?,?,?)",
+                (CHAT, "chat:77", "old", 9997, time.time() - 5 * 3600, 1),
+            )
+        self.bot.update(
+            {
+                "message": self.message(
+                    7, sender_chat={"id": 77, "title": "Shop", "type": "channel"}
+                )
+            }
+        )
+        self.bot.maintain()
+        self.assertEqual(self.case()["phase"], "banned")
+        self.assertEqual(
+            [call["message_id"] for call in self.tg.calls_for("deleteMessage")], [7]
+        )
 
     def test_missing_basis_never_bans(self):
         self.model.verdict = "spam"
