@@ -21,6 +21,8 @@ UPDATES = [
     "message_reaction",
 ]
 ADMINS = {"creator", "administrator"}
+# How long a ban notice accepts "not spam"; the notice expires with it.
+UNDO_WINDOW = 5 * 3600
 
 
 def database(path):
@@ -538,7 +540,7 @@ class Bot:
                 if field == "ban_message":
                     self.db.execute(
                         "UPDATE cases SET ban_message=?,expires=? WHERE id=?",
-                        (sent["message_id"], time.time() + 1800, case["id"]),
+                        (sent["message_id"], time.time() + UNDO_WINDOW, case["id"]),
                     )
                 else:
                     self.db.execute(
@@ -608,7 +610,7 @@ class Bot:
             if phase == "banned" and not case["ban_message"]:
                 self.notice(
                     case,
-                    f"Banned for spam: {label}\n{case['reason']}\nA moderator can select not spam within 30 minutes to unban and exempt this identity. Deleted messages cannot be restored.",
+                    f"Banned for spam: {label}\n{case['reason']}\nA moderator can select not spam within {UNDO_WINDOW // 3600} hours to unban and exempt this identity. Deleted messages cannot be restored.",
                     [[button("not spam", "undo")]],
                     "ban_message",
                 )

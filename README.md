@@ -75,7 +75,7 @@ and Chat Completions responses. There is no silent fallback to another paid prov
 - **Spam:** persist the decision, ban with the appropriate user/sender-chat method,
   and delete messages. User bans request server-side history revocation. Sender-chat
   bans require deleting observed messages individually. Post a ban notice with a
-  **not spam** button that lasts 30 minutes from posting.
+  **not spam** button that lasts 5 hours from posting.
 - **Suspicious:** post **spam / not spam** buttons. The first side to reach **three
   distinct current group members** wins. One immutable vote per person; no self-votes
   or forwarded/cross-chat buttons. A not-spam vote closes that case without exempting
