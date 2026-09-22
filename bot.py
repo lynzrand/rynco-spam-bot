@@ -5,8 +5,10 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
+import unicodedata
 from pathlib import Path
 
 from api import APIError, Classifier, Telegram
@@ -23,6 +25,111 @@ UPDATES = [
 ADMINS = {"creator", "administrator"}
 # How long a ban notice accepts "not spam"; the notice expires with it.
 UNDO_WINDOW = 5 * 3600
+# Only messages sent in the last ten minutes are deleted on a ban (Rynco, 2026-09-22):
+# scraping an occasional false positive's whole posting history out of the group is far
+# worse than leaving an old ad line behind. Message deletions are irreversible.
+DELETE_WINDOW = 10 * 60
+# Profile signals a ban may be corroborated with. Each class counts once, however many
+# of its markers match, and a profile-carried ban needs two different classes — the
+# model's words are never the gate (2026-09-22, case 9: the display name "Plus 猫猫 $270"
+# with an ordinary message was banned on an inference from the price alone). Rynco's
+# rule: spam in the sender's own message — text, caption, entities, attached media —
+# bans at once; otherwise at least two other factors must be present.
+FUNNEL_MARKERS = (
+    "看我简介",
+    "看简介",
+    "见简介",
+    "看我头像",
+    "看头像",
+    "看资料",
+    "看我主页",
+    "简介有",
+    "简介里",
+    "主页有",
+    "link in bio",
+    "check bio",
+    "check my bio",
+    "see my bio",
+    "bio link",
+    "see profile",
+)
+CONTACT_MARKERS = (
+    "加v",
+    "加薇",
+    "加微",
+    "私聊",
+    "私信",
+    "联系我",
+    "扫码",
+    "二维码",
+    "pm me",
+    "dm me",
+    "dm for",
+    "contact me",
+    "msg me",
+)
+OFFER_MARKERS = (
+    "代充",
+    "代购",
+    "接单",
+    "接码",
+    "报价",
+    "出售",
+    "出号",
+    "出账号",
+    "卖号",
+    "低价出",
+    "包赔",
+    "带单",
+    "稳赚",
+    "返利",
+    "刷单",
+    "充值",
+    "上分",
+    "约炮",
+    "上门服务",
+    "裸聊",
+    "福利群",
+    "会员价",
+    "for sale",
+    "paid service",
+    "order now",
+)
+
+
+COMMERCIAL_PATTERN = re.compile(
+    r"[¥￥$€£]\s?\d"
+    r"|\d+\s*(?:元|块|刀|米|円|원)"
+    r"|\bplus\b|\bpro\b|\bvip\b|\bpremium\b"
+    r"|旗舰|官方|客服|工作室|商城|专营|代练|加速器|会员"
+)
+CONTACT_PATTERN = re.compile(
+    r"t\.me/|https?://|www\."
+    r"|@[A-Za-z0-9_]{4,}"
+    r"|\+?\d[\d\s\-()]{7,}\d"
+    r"|扫码|二维码"
+)
+
+
+def profile_text(profile):
+    return unicodedata.normalize(
+        "NFKC", " ".join(str(v) for v in profile.values() if isinstance(v, str))
+    ).lower()
+
+
+def profile_factors(profile):
+    """Independent profile signals a ban may be corroborated with."""
+    text = profile_text(profile)
+    factors = set()
+    if any(marker in text for marker in FUNNEL_MARKERS):
+        factors.add("funnel")
+    if any(marker in text for marker in OFFER_MARKERS):
+        factors.add("offer")
+    if any(marker in text for marker in CONTACT_MARKERS) or CONTACT_PATTERN.search(text):
+        factors.add("contact")
+    if COMMERCIAL_PATTERN.search(text):
+        factors.add("commercial")
+    return factors
 
 
 def database(path):
@@ -298,6 +405,7 @@ class Bot:
             return
         missing_media = []
         downgrade = None
+        basis = None
         try:
             evidence, images = self.evidence(
                 subject, sender, message if event != "join" else None
@@ -313,19 +421,27 @@ class Bot:
                 evidence["event"] = "edited_message"
             result = self.classifier.classify(evidence, images)
             basis = result.get("basis")
-            # Code-level guardrails: only solicitation in the sender's own message can
-            # authorize an automatic ban. Profile-carried evidence, unreadable content,
-            # and a missing verdict marker all cap the case at a member vote instead.
-            profile_only = reaction is not None or event == "join"
-            if result["verdict"] == "spam" and (profile_only or basis != "message"):
+            # Code-level guardrails: the model cannot authorize a ban on its own. Spam in
+            # the sender's own message bans at once; a profile-carried verdict needs two
+            # independent profile signals (stated solicitation, contact channel, price or
+            # commercial name); everything else only opens a member vote.
+            if reaction is not None or event == "join":
+                basis = "profile"  # no message content to carry a verdict
+            factors = profile_factors(evidence["profile"]) if basis == "profile" else set()
+            if result["verdict"] == "spam" and not (
+                basis == "message" or len(factors) >= 2
+            ):
                 downgrade = (
-                    "profile-only" if profile_only else f"basis={basis or 'missing'}"
+                    "profile-factors=%d" % len(factors)
+                    if basis == "profile"
+                    else f"basis={basis or 'missing'}"
                 )
                 result = {
                     "verdict": "suspicious",
                     "reason": (
                         "An automatic ban needs solicitation in the sender's own "
-                        "message; this evidence only flags a vote. " + result["reason"]
+                        "message, or two profile signals; this evidence only flags a "
+                        "vote. " + result["reason"]
                     )[:300],
                 }
             # An inspection gap is not evidence: content nobody could fetch or decode
@@ -392,7 +508,7 @@ class Bot:
             event,
             result["verdict"],
             f" ({downgrade})" if downgrade else "",
-            result.get("basis", "-"),
+            basis or "-",
             ",".join(missing_media) or "-",
             " ".join(result["reason"].split()),
         )
@@ -639,9 +755,8 @@ class Bot:
                     )
                 return
             if kind == "user":
-                self.tg.call(
-                    "banChatMember", chat_id=chat, user_id=target, revoke_messages=True
-                )
+                # No revoke_messages: that wipes the user's entire history in the group.
+                self.tg.call("banChatMember", chat_id=chat, user_id=target)
             else:
                 self.tg.call("banChatSenderChat", chat_id=chat, sender_chat_id=target)
             with self.db:
@@ -699,14 +814,27 @@ class Bot:
                     "ban_message",
                 )
             if phase == "banned" and not case["deleted"]:
-                # Users get server-side history revocation. Sender chats have no such
-                # option: delete every observed message still within the API window.
+                # Only the recent messages of the spam run go; older ones stay, and a case
+                # escalated to a ban long after the fact deletes nothing. Sender chats
+                # have no server-side history revocation, so this is their only cleanup.
+                cutoff = time.time() - DELETE_WINDOW
                 messages = self.db.execute(
                     "SELECT message FROM observations WHERE chat=? AND identity=? AND message IS NOT NULL AND sent>?",
-                    (chat, case["identity"], time.time() - 48 * 3600),
+                    (chat, case["identity"], cutoff),
                 ).fetchall()
                 for message in messages:
                     self.delete(chat, message[0])
+                kept = self.db.execute(
+                    "SELECT count(*) FROM observations WHERE chat=? AND identity=? AND message IS NOT NULL AND sent<=?",
+                    (chat, case["identity"], cutoff),
+                ).fetchone()[0]
+                if kept:
+                    LOG.info(
+                        "Kept %d older message(s) from case %s outside the %d minute deletion window",
+                        kept,
+                        case_id,
+                        DELETE_WINDOW // 60,
+                    )
                 self.tg.call(
                     "deleteAllMessageReactions",
                     chat_id=chat,
