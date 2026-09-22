@@ -296,10 +296,13 @@ class Bot:
         ).hexdigest()
         if observation["checked"] == digest:
             return
+        missing_media = []
+        downgrade = None
         try:
             evidence, images = self.evidence(
                 subject, sender, message if event != "join" else None
             )
+            missing_media = evidence["missing_media"]
             if reaction:
                 evidence["event"] = "reaction"
                 evidence["reaction"] = reaction["new_reaction"]
@@ -309,9 +312,10 @@ class Bot:
             elif edited:
                 evidence["event"] = "edited_message"
             result = self.classifier.classify(evidence, images)
-            # Code-level guardrail: the model cannot authorize profile-only bans.
+            # Code-level guardrails: the model cannot authorize these on its own.
             profile_only = reaction is not None or event == "join"
             if result["verdict"] == "spam" and profile_only:
+                downgrade = "profile-only"
                 result = {
                     "verdict": "suspicious",
                     "reason": (
@@ -319,17 +323,42 @@ class Bot:
                         "review needed. " + result["reason"]
                     )[:300],
                 }
+            # An inspection gap is not evidence: content nobody could fetch or decode
+            # must not open a review, and must never justify a ban.
+            elif missing_media:
+                if (
+                    result["verdict"] == "spam"
+                    and result.get("basis") == "uninspectable"
+                ):
+                    downgrade = "uninspectable"
+                    result = {
+                        "verdict": "suspicious",
+                        "reason": (
+                            "No inspectable evidence for a ban; review needed. "
+                            + result["reason"]
+                        )[:300],
+                    }
+                elif result["verdict"] == "suspicious":
+                    downgrade = "uninspectable"
+                    result = {
+                        "verdict": "clean",
+                        "reason": (
+                            "Inspection gap treated as neutral, no visible indicator: "
+                            + result["reason"]
+                        )[:300],
+                    }
         except APIError as exc:
-            LOG.warning("Classification unavailable: %s", exc)
-            result = {
-                "verdict": "suspicious",
-                "reason": "Automatic classification unavailable; human review needed.",
-            }
+            # A transient provider failure is not evidence either: pass rather than
+            # open a review the members cannot act on, and leave the reason in the log.
+            LOG.warning("Classification unavailable, passing as clean: %s", exc)
+            downgrade = "unavailable"
+            result = {"verdict": "clean", "reason": "Classification unavailable."}
         with self.db:
             active = self.db.execute(
                 "SELECT id FROM cases WHERE chat=? AND identity=? AND phase='review'",
                 (chat, subject),
             ).fetchone()
+            case_id = active[0] if active else None
             if result["verdict"] != "clean":
                 phase = "ban" if result["verdict"] == "spam" else "review"
                 if active and phase == "ban":
@@ -343,7 +372,7 @@ class Bot:
                     name = sender.get("title") or " ".join(
                         sender.get(k, "") for k in ("first_name", "last_name")
                     )
-                    self.db.execute(
+                    case_id = self.db.execute(
                         "INSERT INTO cases(chat,identity,reason,phase,display_name,source_message) VALUES (?,?,?,?,?,?)",
                         (
                             chat,
@@ -357,11 +386,24 @@ class Bot:
                                 else reaction["message_id"] if reaction else None
                             ),
                         ),
-                    )
+                    ).lastrowid
             self.db.execute(
                 "UPDATE observations SET checked=? WHERE id=?",
                 (digest, observation["id"]),
             )
+        # One line per classification: the group-visible reason a case exists or not.
+        LOG.info(
+            "Decision case=%s chat=%s identity=%s event=%s verdict=%s%s basis=%s media=%s reason=%s",
+            case_id or "-",
+            chat,
+            subject,
+            event,
+            result["verdict"],
+            f" ({downgrade})" if downgrade else "",
+            result.get("basis", "-"),
+            ",".join(missing_media) or "-",
+            " ".join(result["reason"].split()),
+        )
 
     def update(self, update):
         if "callback_query" in update:

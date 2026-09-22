@@ -143,6 +143,16 @@ class Classifier:
                 or not 1 <= len(verdict["reason"]) <= 300
             ):
                 raise ValueError("Invalid classification")
-            return verdict
+            return {
+                "verdict": verdict["verdict"],
+                "reason": verdict["reason"],
+                # Only the exact marker for an inspection gap relaxes a verdict, so an
+                # unexpected value can never fail the response (that would review spam).
+                "basis": (
+                    "uninspectable"
+                    if verdict.get("basis") == "uninspectable"
+                    else "visible"
+                ),
+            }
         except (KeyError, IndexError, TypeError, ValueError):
             raise APIError("Invalid classifier response") from None
