@@ -89,7 +89,9 @@ and Chat Completions responses. There is no silent fallback to another paid prov
   channel (link, handle, phone, QR), and a price or commercial name (each class counts once, however many
   tokens it matches). Anything else — one profile signal, a missing or unexpected `basis` — is capped at
   **Suspicious** whatever the model says. Reactions and joins have no message content, so they always take
-  the profile path. For a spam verdict the bot persists the decision, bans with the appropriate
+  the profile path, and they can open a vote only when the profile carries at least one verified profile
+  signal class; a content-free event whose profile yields zero signal classes passes as clean, whatever
+  the model says. For a spam verdict the bot persists the decision, bans with the appropriate
   user/sender-chat method, and deletes messages. Sender-chat
   bans require deleting observed messages individually. Post a ban notice with a
   **not spam** member-vote button and an **undo (moderator)** button that last

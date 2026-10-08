@@ -207,7 +207,7 @@ class BotTests(unittest.TestCase):
 
     def test_untrusted_reactions_check_reactor_without_deleting_target_message(self):
         self.model.verdict = "spam"
-        self.bot.update(self.reaction())
+        self.bot.update(self.reaction(user={"id": 42, "first_name": "看我简介"}))
         self.bot.maintain()
         self.assertEqual(self.model.calls[0][0]["event"], "reaction")
         self.assertEqual(
@@ -276,7 +276,7 @@ class BotTests(unittest.TestCase):
 
     def test_profile_only_reaction_spam_requires_review(self):
         self.model.verdict = "spam"
-        self.bot.update(self.reaction())
+        self.bot.update(self.reaction(user={"id": 42, "first_name": "看我简介"}))
         self.bot.maintain()
         self.assertEqual(self.case()["phase"], "review")
         self.assertIn("An automatic ban needs solicitation", self.case()["reason"])
@@ -284,10 +284,60 @@ class BotTests(unittest.TestCase):
         self.assertFalse(self.tg.calls_for("deleteMessage"))
     def test_profile_only_join_spam_requires_review(self):
         self.model.verdict = "spam"
-        self.send(new_chat_members=[USER])
+        self.send(new_chat_members=[{"id": 42, "first_name": "看我简介"}])
         self.assertEqual(self.case()["phase"], "review")
         self.assertFalse(self.tg.calls_for("banChatMember"))
         self.assertFalse(self.tg.calls_for("deleteMessage"))
+
+    def test_content_free_reaction_without_a_profile_signal_passes_clean(self):
+        # A reaction has no message content: with no profile signal class there is
+        # nothing for members to vote on, so even a suspicious read passes as clean.
+        self.model.verdict = "suspicious"
+        with self.assertLogs("spam-bot", level="INFO") as logs:
+            self.bot.update(self.reaction())
+        self.assertIsNone(self.case())
+        self.assertFalse(self.tg.calls_for("banChatMember"))
+        self.assertFalse(self.tg.calls_for("sendMessage"))
+        self.assertEqual(
+            self.db.execute(
+                "SELECT count(*) FROM observations WHERE identity='user:42'"
+            ).fetchone()[0],
+            1,
+        )
+        line = logs.output[-1]
+        self.assertIn("case=-", line)
+        self.assertIn("verdict=clean (profile-factors=0)", line)
+        self.assertIn("No message content and no profile signal", line)
+
+    def test_content_free_reaction_with_one_profile_signal_reviews(self):
+        self.model.verdict = "suspicious"
+        self.bot.update(self.reaction(user={"id": 42, "first_name": "看我简介"}))
+        self.bot.maintain()
+        self.assertEqual(self.case()["phase"], "review")
+        self.assertFalse(self.tg.calls_for("banChatMember"))
+
+    def test_content_free_join_without_a_profile_signal_passes_clean(self):
+        self.model.verdict = "spam"
+        self.send(new_chat_members=[USER])
+        self.assertIsNone(self.case())
+        self.assertFalse(self.tg.calls_for("banChatMember"))
+        self.assertFalse(self.tg.calls_for("sendMessage"))
+
+    def test_message_carried_spam_with_message_basis_still_bans(self):
+        self.model.verdict = "spam"
+        self.model.basis = "message"
+        self.bot.update({"message": self.message()})
+        self.assertEqual(self.case()["phase"], "ban")
+
+    def test_reaction_spam_with_one_profile_signal_is_capped_at_review(self):
+        self.model.verdict = "spam"
+        with self.assertLogs("spam-bot", level="INFO") as logs:
+            self.bot.update(
+                self.reaction(user={"id": 42, "first_name": "看我简介"})
+            )
+        self.assertEqual(self.case()["phase"], "review")
+        self.assertFalse(self.tg.calls_for("banChatMember"))
+        self.assertIn("profile-factors=1", logs.output[-1])
 
     def test_message_and_edit_spam_still_ban(self):
         self.model.verdict = "spam"
@@ -665,10 +715,10 @@ class BotTests(unittest.TestCase):
     def test_profile_only_downgrade_is_logged(self):
         self.model.verdict = "spam"
         with self.assertLogs("spam-bot", level="INFO") as logs:
-            self.bot.update(self.reaction())
+            self.bot.update(self.reaction(user={"id": 42, "first_name": "看我简介"}))
         line = logs.output[-1]
         self.assertIn("event=reaction:900:100", line)
-        self.assertIn("verdict=suspicious (profile-factors=0)", line)
+        self.assertIn("verdict=suspicious (profile-factors=1)", line)
         self.assertIn("case=1", line)
 
     def uninspectable(self):

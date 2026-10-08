@@ -428,7 +428,20 @@ class Bot:
             if reaction is not None or event == "join":
                 basis = "profile"  # no message content to carry a verdict
             factors = profile_factors(evidence["profile"]) if basis == "profile" else set()
-            if result["verdict"] == "spam" and not (
+            if (
+                (reaction is not None or event == "join")
+                and not factors
+                and result["verdict"] != "clean"
+            ):
+                downgrade = "profile-factors=0"
+                result = {
+                    "verdict": "clean",
+                    "reason": (
+                        "No message content and no profile signal: not enough evidence "
+                        "for a vote. " + result["reason"]
+                    )[:300],
+                }
+            elif result["verdict"] == "spam" and not (
                 basis == "message" or len(factors) >= 2
             ):
                 downgrade = (
