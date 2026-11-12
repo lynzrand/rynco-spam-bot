@@ -150,10 +150,13 @@ class Classifier:
                 basis = ""
             else:
                 basis = " ".join(basis.split())[:24]
+            category = verdict.get("category")
+            category = " ".join(category.split())[:24] if isinstance(category, str) else ""
             return {
                 "verdict": verdict["verdict"],
                 "reason": verdict["reason"],
                 "basis": basis,
+                "category": category,
             }
         except (KeyError, IndexError, TypeError, ValueError):
             raise APIError("Invalid classifier response") from None

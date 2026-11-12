@@ -52,6 +52,7 @@ class FakeClassifier:
         self.verdict = "clean"
         self.reason = "Test evidence."
         self.basis = "message"
+        self.category = "gambling"
         self.calls = []
         self.error = None
 
@@ -59,7 +60,9 @@ class FakeClassifier:
         self.calls.append((evidence, images))
         if self.error:
             raise self.error
-        result = {"verdict": self.verdict, "reason": self.reason}
+        result = {
+            "verdict": self.verdict, "reason": self.reason, "category": self.category
+        }
         if self.basis:
             result["basis"] = self.basis
         return result
@@ -114,6 +117,84 @@ class BotTests(unittest.TestCase):
             }
         )
         self.bot.maintain()
+
+    def test_out_of_scope_ad_passes_silently(self):
+        # Generic account advertising must pass even if the model proposes spam.
+        self.model.verdict = "spam"
+        self.model.category = " Other "
+        with self.assertLogs("spam-bot", level="INFO") as logs:
+            self.send(text="出 ChatGPT 账号，270 一个，私聊")
+        self.assertIsNone(self.case())
+        self.assertFalse(self.tg.calls_for("sendMessage"))
+        self.assertFalse(self.tg.calls_for("banChatMember"))
+        self.assertIn("verdict=clean (category=other)", logs.output[-1])
+        self.assertIn("Out of scope: only gambling and adult advertising is acted on. ",
+                      logs.output[-1])
+
+    def test_missing_or_unexpected_category_caps_message_spam(self):
+        # Message evidence cannot bypass the deterministic scope gate.
+        for category in (None, "", "unexpected"):
+            with self.subTest(category=category):
+                self.model.verdict = "spam"
+                self.model.category = category
+                with self.assertLogs("spam-bot", level="INFO") as logs:
+                    self.send(len(self.model.calls) + 1)
+                self.assertEqual(self.case()["phase"], "review")
+                self.assertFalse(self.tg.calls_for("banChatMember"))
+                self.assertIn("verdict=suspicious (category=missing)", logs.output[-1])
+                self.assertIn("Unrecognised category; a member vote at most. ",
+                              logs.output[-1])
+
+    def test_gambling_message_bans(self):
+        self.model.verdict = "spam"
+        self.send(text="首存100送100 真人荷官 注册送彩金")
+        self.assertEqual(self.case()["phase"], "banned")
+        self.assertTrue(self.tg.calls_for("banChatMember"))
+
+    def test_adult_message_bans(self):
+        self.model.verdict = "spam"
+        self.model.category = "adult"
+        self.send(text="同城约炮 上门服务 加V")
+        self.assertEqual(self.case()["phase"], "banned")
+        self.assertTrue(self.tg.calls_for("banChatMember"))
+
+    def test_two_profile_classes_without_target_only_review(self):
+        self.model.verdict = "spam"
+        self.model.basis = "profile"
+        self.tg.chat["description"] = "看我简介 私聊"
+        with self.assertLogs("spam-bot", level="INFO") as logs:
+            self.send()
+        self.assertEqual(self.case()["phase"], "review")
+        self.assertFalse(self.tg.calls_for("banChatMember"))
+        self.assertIn("profile-factors=2", logs.output[-1])
+
+    def test_target_plus_contact_profile_bans(self):
+        self.model.verdict = "spam"
+        self.model.basis = "profile"
+        self.tg.chat["description"] = "百家乐 加V"
+        self.send()
+        self.assertEqual(self.case()["phase"], "banned")
+        self.assertTrue(self.tg.calls_for("banChatMember"))
+
+    def test_gambling_profile_reaction_reviews_with_profile_basis(self):
+        self.model.verdict = "suspicious"
+        with self.assertLogs("spam-bot", level="INFO") as logs:
+            self.bot.update(self.reaction(user={"id": 42, "first_name": "百家乐 加V"}))
+        self.bot.maintain()
+        self.assertEqual(self.case()["phase"], "review")
+        self.assertFalse(self.tg.calls_for("banChatMember"))
+        self.assertIn("verdict=suspicious", logs.output[-1])
+        self.assertIn("basis=profile category=gambling", logs.output[-1])
+
+    def test_adult_media_without_promotion_passes(self):
+        self.model.category = "other"
+        self.model.reason = "Explicit adult media without promotion."
+        with self.assertLogs("spam-bot", level="INFO") as logs:
+            self.send(photo=[{"file_id": "adult"}])
+        self.assertIsNone(self.case())
+        self.assertFalse(self.tg.calls_for("sendMessage"))
+        self.assertIn("verdict=clean (category=other)", logs.output[-1])
+        self.assertIn("category=other media=-", logs.output[-1])
 
     def test_first_ten_deduplicate_and_skip_edits_after_restart(self):
         first = self.send()
@@ -709,6 +790,7 @@ class BotTests(unittest.TestCase):
         self.assertIn("identity=user:42", line)
         self.assertIn("event=1", line)
         self.assertIn("verdict=clean", line)
+        self.assertIn("category=gambling", line)
         self.assertIn("media=-", line)
         self.assertIn("reason=Test evidence.", line)
 
@@ -720,6 +802,7 @@ class BotTests(unittest.TestCase):
         self.assertIn("event=reaction:900:100", line)
         self.assertIn("verdict=suspicious (profile-factors=1)", line)
         self.assertIn("case=1", line)
+        self.assertIn("category=gambling", line)
 
     def uninspectable(self):
         """A visible profile photo that will not download leaves an inspection gap."""
@@ -775,10 +858,10 @@ class BotTests(unittest.TestCase):
         self.assertIn("profile-factors=1", logs.output[-1])
 
     def test_two_profile_factors_ban(self):
-        # A stated solicitation plus a contact channel is the hit-and-run ad pattern.
+        # Target wording plus a contact channel is the in-scope ad pattern.
         self.model.verdict = "spam"
         self.model.basis = "profile"
-        self.tg.chat["description"] = "看我简介"
+        self.tg.chat["description"] = "百家乐"
         self.send(
             **{"from": {"id": 42, "first_name": "Example", "username": "t.me/shop"}}
         )
@@ -823,12 +906,16 @@ class BotTests(unittest.TestCase):
             profile_factors({"description": "全妆跟妆 500 元 约妆私聊"}),
             {"commercial", "contact"},
         )
+        self.assertEqual(
+            profile_factors({"description": "百家乐 博彩 CASINO 加V 私聊"}),
+            {"target", "contact"},
+        )
         self.assertEqual(profile_factors({"first_name": "野花"}), set())
 
     def test_offer_plus_contact_bans(self):
         self.model.verdict = "spam"
         self.model.basis = "profile"
-        self.tg.chat["description"] = "出账号 270一个 需要私聊"
+        self.tg.chat["description"] = "同城约炮 上门服务 加V"
         self.send()
         self.assertEqual(self.case()["phase"], "banned")
 
@@ -933,7 +1020,8 @@ class ClassifierTests(unittest.TestCase):
                     "finish_reason": "stop",
                     "message": {
                         "content": json.dumps(
-                            {"verdict": "clean", "reason": "Relevant discussion."}
+                            {"verdict": "clean", "reason": "Relevant discussion.",
+                             "category": "other"}
                         )
                     },
                 }
@@ -981,9 +1069,11 @@ class ClassifierTests(unittest.TestCase):
         client = Classifier("https://example.invalid/v1", "test", "test", "test")
 
         def completion(content):
+            value = json.loads(content)
+            value["category"] = "other"
             return {
                 "choices": [
-                    {"finish_reason": "stop", "message": {"content": content}}
+                    {"finish_reason": "stop", "message": {"content": json.dumps(value)}}
                 ]
             }
 
@@ -998,6 +1088,39 @@ class ClassifierTests(unittest.TestCase):
                 "api.request_json", return_value=completion(content)
             ):
                 self.assertEqual(client.classify({}, [])["basis"], expected)
+
+    def test_category_is_normalized_and_never_fails_the_response(self):
+        client = Classifier("https://example.invalid/v1", "test", "test", "test")
+        for value, expected in (
+            ("gambling", "gambling"),
+            ("  adult\n video  ", "adult video"),
+            ("x" * 30, "x" * 24),
+            (None, ""),
+            (123, ""),
+            ([], ""),
+            ({}, ""),
+            ("   ", ""),
+            ("unexpected", "unexpected"),
+        ):
+            content = {"verdict": "clean", "reason": "x", "category": value}
+            with self.subTest(value=value), patch(
+                "api.request_json",
+                return_value={
+                    "choices": [
+                        {"finish_reason": "stop",
+                         "message": {"content": json.dumps(content)}}
+                    ]
+                },
+            ):
+                self.assertEqual(client.classify({}, [])["category"], expected)
+        with patch(
+            "api.request_json",
+            return_value={"choices": [{
+                "finish_reason": "stop",
+                "message": {"content": json.dumps({"verdict": "clean", "reason": "x"})},
+            }]},
+        ):
+            self.assertEqual(client.classify({}, [])["category"], "")
 
 
 if __name__ == "__main__":

@@ -7,8 +7,10 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/home/claw/projects/rynco-spam-bot
 EnvironmentFile=/home/claw/projects/rynco-spam-bot/.env
-Environment=http_proxy=http://127.0.0.1:20171
-Environment=https_proxy=http://127.0.0.1:20171
+# Egress goes through v2rayA on the NAS (the local instance was retired 2026-10-26).
+Environment=http_proxy=http://192.168.77.33:20171
+Environment=https_proxy=http://192.168.77.33:20171
+Environment=no_proxy=127.0.0.1,localhost,::1
 ExecStart=/run/current-system/sw/bin/python3 /home/claw/projects/rynco-spam-bot/bot.py
 Restart=on-failure
 RestartSec=10

@@ -4,7 +4,7 @@ A small Python 3.11+ bot using the Telegram Bot API, an OpenAI-compatible vision
 Chat Completions endpoint, and SQLite. No third-party Python packages or containers
 are required. Media extraction uses FFmpeg, Poppler, and whisper.cpp.
 The configured provider is **DeepSeek 4.1 Flash on OpenCode Go**:
-`https://opencode.ai/zen/go/v1`, model `deepseek-flash`.
+`https://opencode.ai/zen/go/v1`, model `deepseek-v4.1-flash`.
 Classifier requests explicitly set `reasoning_effort: low`, using DeepSeek's
 [documented thinking control](https://api-docs.deepseek.com/guides/thinking_mode/).
 
@@ -48,6 +48,16 @@ and Chat Completions responses. There is no silent fallback to another paid prov
 
 ## Behavior
 
+Only gambling and adult/pornographic advertising is acted on. Everything else,
+including account sales, task/rebate scams, makeup, consulting, investment bait,
+and phishing, is ignored. Explicit adult media without promotion is also ignored.
+
+The classifier returns `verdict`, `reason`, `basis`, and `category` (`gambling`,
+`adult`, or `other`). The code normalizes category whitespace and case for its
+scope gate: `other` passes as clean with downgrade label `category=other`; missing
+or unexpected categories cap non-clean verdicts at a member vote with label
+`category=missing`. The content-free zero-factor rule takes precedence.
+
 - Check the first **10 distinct observed messages per identity per group** (adjust
   `FIRST_MESSAGES`), plus the first observed join/profile event. Join messages do
   not consume the ten-message budget. Repeated join updates with unchanged user
@@ -63,8 +73,8 @@ and Chat Completions responses. There is no silent fallback to another paid prov
   post's author is never treated as the reactor. Reactions to the bot's own review
   and ban notices are ignored entirely because they are moderation UI. Evidence that
   rests on the profile rather than on content the sender posted — any event, including
-  messages — can only reach human review, never an automatic ban, even if the
-  classifier returns spam. This is separate from review-button
+  messages — needs two profile classes, one of them gambling/adult wording, for an
+  automatic ban. This is separate from review-button
   voting. A ban also removes that identity's recent reactions using Telegram's
   `deleteAllMessageReactions` (up to 10000), never the innocent reacted-to messages.
 - Prefer `sender_chat` over Telegram's placeholder `from` user. Channel identities
@@ -82,12 +92,14 @@ and Chat Completions responses. There is no silent fallback to another paid prov
   ban long after the message was posted therefore deletes nothing. A ban also removes that identity's
   reactions using Telegram's `deleteAllMessageReactions` (up to 10000), never the innocent
   reacted-to messages; that call has no time filter.
-- **Spam:** the classifier's verdict must clear the code's own evidence gate: **solicitation in the
+- **Spam:** the classifier's category must be `gambling` or `adult`, and its verdict
+  must clear the code's own evidence gate: **solicitation in the
   sender's own message** (`basis` is `message` — text, caption, entities, or attached media, images
   included) bans at once, and a profile-carried verdict (`basis` is `profile`) needs **two independent
-  profile signals** verified by the bot — a stated solicitation (funnel or offer wording), a contact
-  channel (link, handle, phone, QR), and a price or commercial name (each class counts once, however many
-  tokens it matches). Anything else — one profile signal, a missing or unexpected `basis` — is capped at
+  profile classes, one of them gambling/adult wording**, verified by the bot. The classes are
+  target wording, funnel wording, offer wording, contact channel (link, handle, phone, QR),
+  and price or commercial name; each class counts once, however many tokens it matches.
+  Anything else — no target wording, one profile signal, a missing or unexpected `basis` — is capped at
   **Suspicious** whatever the model says. Reactions and joins have no message content, so they always take
   the profile path, and they can open a vote only when the profile carries at least one verified profile
   signal class; a content-free event whose profile yields zero signal classes passes as clean, whatever
@@ -122,7 +134,8 @@ and Chat Completions responses. There is no silent fallback to another paid prov
   Telegram remains unknown.
 - Every classification is logged as one line — `case=`, `chat=`, `identity=`, `event=`,
   `verdict=` (with the code-level downgrade in parentheses when one applied),
-  `media=` (the inspection gaps) and the model's `reason=`. That line is the only
+  `basis=`, `category=` (`-` when empty), `media=` (the inspection gaps), and the
+  model's `reason=`. That line is the only
   record of a clean decision and of why a review was opened; the update payload and the
   evidence themselves are not stored.
 

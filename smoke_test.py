@@ -32,8 +32,10 @@ def main():
         os.environ["OPENAI_BASE_URL"],
         os.environ["OPENAI_API_KEY"],
         os.environ["OPENAI_MODEL"],
-        "General discussion; unsolicited advertising is not permitted.",
+        "General technical discussion. Only gambling and adult advertising is acted on.",
     )
+    # Scope lock (2026-11-10): gambling and adult advertising only. Every other spam
+    # family must come back clean, so those cases are as important as the ad cases.
     cases = [
         (
             "Chinese question without avatar",
@@ -43,15 +45,22 @@ def main():
             {},
         ),
         (
-            "Chinese task scam",
-            "高佣金兼职，点赞做任务日赚2000，先充值500领取任务，私聊我马上返利！",
+            "Gambling deposit ad",
+            "新会员首存100送100，真人荷官百家乐，注册送彩金 t.me/bet888",
             "spam",
             [],
             {},
         ),
         (
-            "Scam warning",
-            "注意骗局：有人用刷单返利骗押金，千万不要充值。",
+            "Adult escort ad",
+            "同城约炮，学生妹上门服务，加V详聊",
+            "spam",
+            [],
+            {},
+        ),
+        (
+            "Scam warning about gambling",
+            "注意骗局：有人用博彩计划群骗押金，千万不要转账。",
             "clean",
             [],
             {},
@@ -63,23 +72,49 @@ def main():
             [("Message image", color_swatch())],
             {},
         ),
-        # Regression: a profile funnel with no second signal is a member vote, while a
-        # funnel plus a contact channel is the hit-and-run ad pattern the bot bans.
-        ("Profile funnel without bio", "看我简介", "spam", [], {}),
-        ("Profile funnel in name", "你好", "spam", [], {"first_name": "看我简介"}),
         (
-            "Advertising account greeting",
-            "大家好",
+            "Gambling caption over an image",
+            "六合彩内部资料 三期必中 加V领料",
             "spam",
-            [],
-            {"description": "专业网站建设，承接企业官网和商城开发，需要的私聊报价。"},
+            [("Message image", color_swatch())],
+            {},
         ),
+        # Out of scope since the 2026-11-10 retarget: ordinary spam families pass.
         (
             "Account selling message",
             "出 ChatGPT Plus 账号 270 一个 需要的私聊",
-            "spam",
+            "clean",
             [],
             {},
+        ),
+        (
+            "Task scam message",
+            "高佣金兼职，点赞做任务日赚2000，先充值500领取任务，私聊我马上返利！",
+            "clean",
+            [],
+            {},
+        ),
+        (
+            "Commercial profile greeting",
+            "大家好",
+            "clean",
+            [],
+            {"description": "专业网站建设，承接企业官网和商城开发，需要的私聊报价。"},
+        ),
+        # In scope, profile-carried: two classes, one of them gambling wording.
+        (
+            "Gambling profile greeting",
+            "大家好",
+            "spam",
+            [],
+            {"description": "专业带计划，稳定盈利，加V详聊"},
+        ),
+        (
+            "Redirect-only profile",
+            "你好",
+            "clean",
+            [],
+            {"first_name": "看我简介", "description": "喜欢旅行和摄影"},
         ),
         (
             "Profile funnel warning",

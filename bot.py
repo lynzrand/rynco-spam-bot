@@ -23,6 +23,8 @@ UPDATES = [
     "message_reaction",
 ]
 ADMINS = {"creator", "administrator"}
+SCOPE_CATEGORIES = {"gambling", "adult"}
+KNOWN_CATEGORIES = SCOPE_CATEGORIES | {"other"}
 # How long a ban notice accepts "not spam"; the notice expires with it.
 UNDO_WINDOW = 5 * 3600
 # Only messages sent in the last ten minutes are deleted on a ban (Rynco, 2026-09-22):
@@ -34,7 +36,8 @@ DELETE_WINDOW = 10 * 60
 # model's words are never the gate (2026-09-22, case 9: the display name "Plus 猫猫 $270"
 # with an ordinary message was banned on an inference from the price alone). Rynco's
 # rule: spam in the sender's own message — text, caption, entities, attached media —
-# bans at once; otherwise at least two other factors must be present.
+# bans at once; otherwise at least two other factors must be present, including
+# gambling or adult wording. Both paths require an in-scope category.
 FUNNEL_MARKERS = (
     "看我简介",
     "看简介",
@@ -96,6 +99,54 @@ OFFER_MARKERS = (
     "order now",
 )
 
+TARGET_MARKERS = (
+    "博彩",
+    "菠菜",
+    "赌场",
+    "下注",
+    "彩票",
+    "彩金",
+    "首存",
+    "返水",
+    "洗码",
+    "真人荷官",
+    "百家乐",
+    "牛牛",
+    "时时彩",
+    "六合彩",
+    "特码",
+    "计划群",
+    "带计划",
+    "包赢",
+    "包赔",
+    "稳赚",
+    "必中",
+    "上岸",
+    "回本",
+    "棋牌",
+    "皇冠",
+    "新葡京",
+    "威尼斯人",
+    "注册送",
+    "约炮",
+    "上门服务",
+    "包夜",
+    "学生妹",
+    "楼凤",
+    "全套",
+    "裸聊",
+    "福利群",
+    "资源群",
+    "看片",
+    "黄网",
+    "成人视频",
+    "无码",
+    "casino",
+    "betting",
+    "bk8",
+    "1xbet",
+)
+
 
 COMMERCIAL_PATTERN = re.compile(
     r"[¥￥$€£]\s?\d"
@@ -127,6 +178,8 @@ def profile_factors(profile):
         factors.add("offer")
     if any(marker in text for marker in CONTACT_MARKERS) or CONTACT_PATTERN.search(text):
         factors.add("contact")
+    if any(marker in text for marker in TARGET_MARKERS):
+        factors.add("target")
     if COMMERCIAL_PATTERN.search(text):
         factors.add("commercial")
     return factors
@@ -406,6 +459,7 @@ class Bot:
         missing_media = []
         downgrade = None
         basis = None
+        category = ""
         try:
             evidence, images = self.evidence(
                 subject, sender, message if event != "join" else None
@@ -421,10 +475,11 @@ class Bot:
                 evidence["event"] = "edited_message"
             result = self.classifier.classify(evidence, images)
             basis = result.get("basis")
+            category = str(result.get("category") or "").strip().lower()
             # Code-level guardrails: the model cannot authorize a ban on its own. Spam in
             # the sender's own message bans at once; a profile-carried verdict needs two
-            # independent profile signals (stated solicitation, contact channel, price or
-            # commercial name); everything else only opens a member vote.
+            # independent profile signals, including gambling or adult wording. Both
+            # paths require an in-scope category; other advertising passes silently.
             if reaction is not None or event == "join":
                 basis = "profile"  # no message content to carry a verdict
             factors = profile_factors(evidence["profile"]) if basis == "profile" else set()
@@ -441,8 +496,26 @@ class Bot:
                         "for a vote. " + result["reason"]
                     )[:300],
                 }
+            elif category in KNOWN_CATEGORIES and category not in SCOPE_CATEGORIES:
+                downgrade = "category=other"
+                result = {
+                    "verdict": "clean",
+                    "reason": (
+                        "Out of scope: only gambling and adult advertising is acted on. "
+                        + result["reason"]
+                    )[:300],
+                }
+            elif category not in KNOWN_CATEGORIES and result["verdict"] != "clean":
+                downgrade = "category=missing"
+                result = {
+                    "verdict": "suspicious",
+                    "reason": (
+                        "Unrecognised category; a member vote at most. " + result["reason"]
+                    )[:300],
+                }
             elif result["verdict"] == "spam" and not (
-                basis == "message" or len(factors) >= 2
+                basis == "message"
+                or (basis == "profile" and len(factors) >= 2 and "target" in factors)
             ):
                 downgrade = (
                     "profile-factors=%d" % len(factors)
@@ -453,8 +526,8 @@ class Bot:
                     "verdict": "suspicious",
                     "reason": (
                         "An automatic ban needs solicitation in the sender's own "
-                        "message, or two profile signals; this evidence only flags a "
-                        "vote. " + result["reason"]
+                        "message, or two profile signals including gambling/adult wording; "
+                        "this evidence only flags a vote. " + result["reason"]
                     )[:300],
                 }
             # An inspection gap is not evidence: content nobody could fetch or decode
@@ -514,7 +587,7 @@ class Bot:
             )
         # One line per classification: the group-visible reason a case exists or not.
         LOG.info(
-            "Decision case=%s chat=%s identity=%s event=%s verdict=%s%s basis=%s media=%s reason=%s",
+            "Decision case=%s chat=%s identity=%s event=%s verdict=%s%s basis=%s category=%s media=%s reason=%s",
             case_id or "-",
             chat,
             subject,
@@ -522,6 +595,7 @@ class Bot:
             result["verdict"],
             f" ({downgrade})" if downgrade else "",
             basis or "-",
+            category or "-",
             ",".join(missing_media) or "-",
             " ".join(result["reason"].split()),
         )
