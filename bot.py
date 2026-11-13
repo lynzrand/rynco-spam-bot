@@ -187,6 +187,40 @@ def profile_text(profile):
     ).lower()
 
 
+# A message whose entire content is a bot deep link carrying a referral payload
+# ("t.me/SomeBot?start=458338") is an invite-farming ad with nothing to read: no text,
+# no media, so the classifier can only answer clean/other and the ad never surfaces
+# (2026-11-13: a stranger's only message was @Honey_FarmBot's referral link). The shape
+# is decidable in code, so it opens a member vote and can never ban on its own.
+REFERRAL_LINK = re.compile(
+    r"(?:https?://)?(?:www\.)?t(?:elegram)?\.me/(?P<name>[A-Za-z][A-Za-z0-9_]{3,31})"
+    r"(?:\?start=(?P<start>[A-Za-z0-9_-]{1,64}))?/?",
+    re.IGNORECASE,
+)
+
+
+def referral_funnel(text):
+    """True when the whole message is bot deep links, at least one with ?start=."""
+    if not text:
+        return False
+    cleaned = "".join(
+        ch
+        for ch in text
+        if unicodedata.category(ch) not in ("Cf", "Cs", "So", "Sk", "Mn")
+    )
+    tokens = cleaned.split()
+    if not 1 <= len(tokens) <= 5:
+        return False
+    payload = False
+    for token in tokens:
+        link = REFERRAL_LINK.fullmatch(token)
+        if not link:
+            return False
+        if link.group("start") and link.group("name").lower().endswith("bot"):
+            payload = True
+    return payload
+
+
 def profile_factors(profile):
     """Independent profile signals a ban may be corroborated with."""
     text = profile_text(profile)
@@ -502,7 +536,19 @@ class Bot:
             if reaction is not None or event == "join":
                 basis = "profile"  # no message content to carry a verdict
             factors = profile_factors(evidence["profile"]) if basis == "profile" else set()
-            if (
+            if referral_funnel(evidence["message"].get("text")):
+                # Deterministic shape rule, checked before the scope gate: a bare
+                # referral deep link has no category to judge, so the model's
+                # clean/other cannot bury it. Members vote; nothing is banned here.
+                downgrade = "referral-funnel"
+                result = {
+                    "verdict": "suspicious",
+                    "reason": (
+                        "The whole message is a bot referral link and nothing else "
+                        "(invite farming). Members decide. " + result["reason"]
+                    )[:300],
+                }
+            elif (
                 (reaction is not None or event == "join")
                 and not factors
                 and result["verdict"] != "clean"

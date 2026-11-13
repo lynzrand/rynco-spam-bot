@@ -169,6 +169,50 @@ class BotTests(unittest.TestCase):
                 self.assertIn("Unrecognised category; a member vote at most. ",
                               logs.output[-1])
 
+    def test_referral_funnel_shape_is_declared_in_code(self):
+        from bot import referral_funnel
+        self.assertTrue(referral_funnel("https://t.me/Honey_FarmBot?start=458338"))
+        self.assertTrue(referral_funnel("t.me/Honey_FarmBot?start=458338"))
+        # Decoration and format characters must not hide the shape.
+        self.assertTrue(referral_funnel("\u200b👉 t.me/Honey_FarmBot?start=458338 👈"))
+        # Sharing a bot is not advertising it; a non-bot link carries no referral.
+        self.assertFalse(referral_funnel("t.me/Honey_FarmBot"))
+        self.assertFalse(referral_funnel("t.me/somechannel?start=1"))
+        self.assertFalse(referral_funnel("看看这个 t.me/Honey_FarmBot?start=1"))
+        self.assertFalse(referral_funnel("https://example.com/?start=1"))
+        self.assertFalse(referral_funnel(""))
+        self.assertFalse(referral_funnel(None))
+
+    def test_referral_deep_link_alone_opens_a_vote(self):
+        # A stranger whose only message is a bot referral link has nothing to classify,
+        # so the model can only answer clean/other (2026-11-13, @Honey_FarmBot).
+        self.model.verdict = "clean"
+        self.model.category = "other"
+        with self.assertLogs("spam-bot", level="INFO") as logs:
+            self.send(text="https://t.me/Honey_FarmBot?start=458338")
+        self.assertEqual(self.case()["phase"], "review")
+        self.assertFalse(self.tg.calls_for("banChatMember"))
+        self.assertIn("verdict=suspicious (referral-funnel)", logs.output[-1])
+
+    def test_referral_deep_link_never_bans(self):
+        # Even a model shouting spam cannot turn an uncategorised link into a ban.
+        self.model.verdict = "spam"
+        self.send(text="t.me/Honey_FarmBot?start=458338")
+        self.assertEqual(self.case()["phase"], "review")
+        self.assertFalse(self.tg.calls_for("banChatMember"))
+
+    def test_bot_link_without_referral_payload_passes(self):
+        self.model.verdict = "clean"
+        self.model.category = "other"
+        self.send(text="t.me/Honey_FarmBot")
+        self.assertIsNone(self.case())
+
+    def test_referral_link_beside_text_is_left_to_scope(self):
+        self.model.verdict = "clean"
+        self.model.category = "other"
+        self.send(text="这个机器人挺好玩 https://t.me/Honey_FarmBot?start=458338")
+        self.assertIsNone(self.case())
+
     def test_gambling_message_bans(self):
         self.model.verdict = "spam"
         self.send(text="首存100送100 真人荷官 注册送彩金")

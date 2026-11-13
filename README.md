@@ -58,6 +58,15 @@ scope gate: `other` passes as clean with downgrade label `category=other`; missi
 or unexpected categories cap non-clean verdicts at a member vote with label
 `category=missing`. The content-free zero-factor rule takes precedence.
 
+**Referral funnel.** When a message consists of nothing but bot deep links and at least
+one carries a referral payload (`t.me/<name>bot?start=…`), the code opens a member vote
+labelled `referral-funnel` whatever the model answered. A bare referral link states no
+offer, so the classifier can only return `clean/other` and the scope gate would bury an
+invite-farming ad unseen (2026-11-13, a stranger's only message was @Honey_FarmBot's
+`?start=458338`). It never bans: the payload proves invite farming, not an in-scope
+offer. Zero-width, emoji and other decoration are stripped before matching; a bot link
+without `?start=`, a non-bot link, or a link beside any text keeps the normal path.
+
 - Check the first **10 distinct observed messages per identity per group** (adjust
   `FIRST_MESSAGES`), plus the first observed join/profile event. Join messages do
   not consume the ten-message budget. Repeated join updates with unchanged user
