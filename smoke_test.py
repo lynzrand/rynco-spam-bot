@@ -32,10 +32,11 @@ def main():
         os.environ["OPENAI_BASE_URL"],
         os.environ["OPENAI_API_KEY"],
         os.environ["OPENAI_MODEL"],
-        "General technical discussion. Only gambling and adult advertising is acted on.",
+        "General technical discussion. Only gambling, adult and account-trading "
+        "advertising is acted on.",
     )
-    # Scope lock (2026-11-10): gambling and adult advertising only. Every other spam
-    # family must come back clean, so those cases are as important as the ad cases.
+    # Scope (2026-11-13): gambling, adult and account-trading advertising. Every other
+    # spam family must come back clean, so those cases matter as much as the ad cases.
     cases = [
         (
             "Chinese question without avatar",
@@ -79,14 +80,22 @@ def main():
             [("Message image", color_swatch())],
             {},
         ),
-        # Out of scope since the 2026-11-10 retarget: ordinary spam families pass.
+        # Account trading is in scope again (2026-11-13).
         (
             "Account selling message",
             "出 ChatGPT Plus 账号 270 一个 需要的私聊",
+            "spam",
+            [],
+            {},
+        ),
+        (
+            "Account recovery question",
+            "我账号昨天被封了，谁知道怎么申诉？",
             "clean",
             [],
             {},
         ),
+        # Out of scope: ordinary spam families pass.
         (
             "Task scam message",
             "高佣金兼职，点赞做任务日赚2000，先充值500领取任务，私聊我马上返利！",
