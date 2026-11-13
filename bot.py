@@ -23,7 +23,10 @@ UPDATES = [
     "message_reaction",
 ]
 ADMINS = {"creator", "administrator"}
-SCOPE_CATEGORIES = {"gambling", "adult"}
+# In-scope advertising: gambling, adult, and account trading (Rynco, 2026-11-13:
+# 「卖号还是封吧」 — account/social/game/AI account sales are banned again, after a
+# day of the narrower gambling+adult-only scope).
+SCOPE_CATEGORIES = {"gambling", "adult", "account"}
 KNOWN_CATEGORIES = SCOPE_CATEGORIES | {"other"}
 # How long a ban notice accepts "not spam"; the notice expires with it.
 UNDO_WINDOW = 5 * 3600
@@ -37,7 +40,7 @@ DELETE_WINDOW = 10 * 60
 # with an ordinary message was banned on an inference from the price alone). Rynco's
 # rule: spam in the sender's own message — text, caption, entities, attached media —
 # bans at once; otherwise at least two other factors must be present, including
-# gambling or adult wording. Both paths require an in-scope category.
+# gambling, adult or account-trading wording. Both paths require an in-scope category.
 FUNNEL_MARKERS = (
     "看我简介",
     "看简介",
@@ -145,6 +148,22 @@ TARGET_MARKERS = (
     "betting",
     "bk8",
     "1xbet",
+    # Account trading (in scope since 2026-11-13). Compound forms only: a bare 账号 is
+    # ordinary conversation and would make the factor class meaningless.
+    "卖号",
+    "出号",
+    "收号",
+    "出账号",
+    "收账号",
+    "账号出售",
+    "出售账号",
+    "账号交易",
+    "账号回收",
+    "号商",
+    "接码",
+    "account sale",
+    "selling account",
+    "buy account",
 )
 
 
@@ -478,7 +497,7 @@ class Bot:
             category = str(result.get("category") or "").strip().lower()
             # Code-level guardrails: the model cannot authorize a ban on its own. Spam in
             # the sender's own message bans at once; a profile-carried verdict needs two
-            # independent profile signals, including gambling or adult wording. Both
+            # independent profile signals, including in-scope wording. Both
             # paths require an in-scope category; other advertising passes silently.
             if reaction is not None or event == "join":
                 basis = "profile"  # no message content to carry a verdict
@@ -501,7 +520,8 @@ class Bot:
                 result = {
                     "verdict": "clean",
                     "reason": (
-                        "Out of scope: only gambling and adult advertising is acted on. "
+                        "Out of scope: only gambling, adult and account-trading "
+                        "advertising is acted on. "
                         + result["reason"]
                     )[:300],
                 }
@@ -526,7 +546,7 @@ class Bot:
                     "verdict": "suspicious",
                     "reason": (
                         "An automatic ban needs solicitation in the sender's own "
-                        "message, or two profile signals including gambling/adult wording; "
+                        "message, or two profile signals including in-scope wording; "
                         "this evidence only flags a vote. " + result["reason"]
                     )[:300],
                 }

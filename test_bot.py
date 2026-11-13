@@ -119,17 +119,41 @@ class BotTests(unittest.TestCase):
         self.bot.maintain()
 
     def test_out_of_scope_ad_passes_silently(self):
-        # Generic account advertising must pass even if the model proposes spam.
+        # Generic paid-service advertising must pass even if the model proposes spam.
         self.model.verdict = "spam"
         self.model.category = " Other "
         with self.assertLogs("spam-bot", level="INFO") as logs:
-            self.send(text="出 ChatGPT 账号，270 一个，私聊")
+            self.send(text="刷单返利 日结兼职 加V 详聊")
         self.assertIsNone(self.case())
         self.assertFalse(self.tg.calls_for("sendMessage"))
         self.assertFalse(self.tg.calls_for("banChatMember"))
         self.assertIn("verdict=clean (category=other)", logs.output[-1])
-        self.assertIn("Out of scope: only gambling and adult advertising is acted on. ",
+        self.assertIn("Out of scope: only gambling, adult and account-trading "
+                      "advertising is acted on. ",
                       logs.output[-1])
+
+    def test_account_sale_message_bans(self):
+        self.model.verdict = "spam"
+        self.model.category = " Account "
+        self.send(text="出 ChatGPT 账号，270 一个，私聊")
+        self.assertEqual(self.case()["phase"], "banned")
+        self.assertTrue(self.tg.calls_for("banChatMember"))
+
+    def test_account_sale_profile_needs_target_factor(self):
+        # Two profile classes without account wording stay at a member vote.
+        self.model.verdict = "spam"
+        self.model.basis = "profile"
+        self.model.category = "account"
+        self.tg.chat["description"] = "看我简介 私聊"
+        with self.assertLogs("spam-bot", level="INFO") as logs:
+            self.send()
+        self.assertEqual(self.case()["phase"], "review")
+        self.assertIn("profile-factors=2", logs.output[-1])
+
+    def test_account_markers_are_a_target_factor(self):
+        from bot import profile_factors
+        self.assertEqual(profile_factors({"description": "长期收号 出号 联系我"}),
+                         {"target", "offer", "contact"})
 
     def test_missing_or_unexpected_category_caps_message_spam(self):
         # Message evidence cannot bypass the deterministic scope gate.
