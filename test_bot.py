@@ -288,6 +288,29 @@ class BotTests(unittest.TestCase):
             profile_factors({"description": "Write to me in private"}), {"invite"}
         )
 
+    def test_context_window_reaches_the_classifier(self):
+        from bot import CONTEXT_MESSAGES
+        self.model.verdict, self.model.category = "clean", "other"
+        self.send(1, text="编译器后端讨论：SSA 和寄存器分配", **{"from": {"id": 51, "first_name": "A"}})
+        self.send(2, text="同意，塔上优先级也影响 codegen", **{"from": {"id": 52, "first_name": "B"}})
+        context = self.model.calls[-1][0]["recent_conversation"]
+        self.assertLessEqual(len(context), CONTEXT_MESSAGES)
+        self.assertIn("SSA", context[0]["text"])
+        self.assertIn("user:51", context[0]["from"])
+        # The observed message is in the window as its last entry.
+        self.assertEqual(context[-1]["text"], "同意，塔上优先级也影响 codegen")
+
+    def test_context_window_is_bounded_and_marks_joins(self):
+        from bot import CONTEXT_MESSAGES
+        self.model.verdict, self.model.category = "clean", "other"
+        self.bot.record(CHAT, "user:61", {"first_name": "Joiner"}, kind="join")
+        for number in range(1, CONTEXT_MESSAGES + 6):
+            self.send(number, text=f"message {number}", **{"from": {"id": 62, "first_name": "Talker"}})
+        context = self.bot.transcript(CHAT)
+        self.assertEqual(len(context), CONTEXT_MESSAGES)
+        self.assertNotIn("join", [entry["kind"] for entry in context])
+        self.assertEqual(context[-1]["text"], f"message {CONTEXT_MESSAGES + 5}")
+
     def test_gambling_message_bans(self):
         self.model.verdict = "spam"
         self.send(text="首存100送100 真人荷官 注册送彩金")

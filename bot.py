@@ -9,6 +9,7 @@ import re
 import sqlite3
 import time
 import unicodedata
+from collections import deque
 from pathlib import Path
 
 from api import APIError, Classifier, Telegram
@@ -366,11 +367,21 @@ def is_member(member):
     )
 
 
+# Context window handed to the classifier (Rynco, 2026-11-15): a verdict on one message
+# is easier with a short stretch of what was being said around it — whether the sender's
+# own words are addressed to the group or dropped cold into it. Bounded twice, by count
+# and by age, and kept in memory only: the transcript is never written to disk.
+CONTEXT_MESSAGES = 30
+CONTEXT_SPAN = 3600
+CONTEXT_TEXT_CHARS = 160
+
+
 class Bot:
     def __init__(self, db, telegram, classifier, chats, first_messages=10):
         self.db, self.tg, self.classifier = db, telegram, classifier
         self.chats, self.first_messages = set(chats), first_messages
         self.media = Media(telegram)
+        self.recent = {}  # chat -> deque of {date, identity, name, kind, text}
 
     def member(self, chat, user):
         return self.tg.call("getChatMember", chat_id=chat, user_id=user)
@@ -479,6 +490,7 @@ class Bot:
             "message": (
                 {k: message[k] for k in fields if k in message} if message else {}
             ),
+            "recent_conversation": self.transcript(chat),
             "missing_media": missing_media,
             "media": media_evidence,
         }
@@ -504,6 +516,52 @@ class Bot:
             (chat, subject),
         ).fetchone()
         return checked >= self.first_messages and not pending
+
+    def record(self, chat, subject, sender, message=None, kind="message"):
+        """Append this group's live traffic to the in-memory context window."""
+        name = " ".join(
+            str(sender.get(k) or "") for k in ("first_name", "last_name")
+        ).strip() or str(sender.get("title") or sender.get("username") or "member")
+        text = ""
+        if message:
+            text = " ".join(
+                str(message.get("text") or message.get("caption") or "").split()
+            )
+            for marker in (
+                "photo",
+                "sticker",
+                "video",
+                "animation",
+                "voice",
+                "audio",
+                "document",
+            ):
+                if marker in message:
+                    kind = marker
+                    break
+        self.recent.setdefault(chat, deque(maxlen=CONTEXT_MESSAGES)).append(
+            {
+                "date": message["date"] if message else time.time(),
+                "identity": subject,
+                "name": " ".join(name.split())[:40],
+                "kind": kind,
+                "text": text[:CONTEXT_TEXT_CHARS],
+            }
+        )
+
+    def transcript(self, chat):
+        """The bounded window handed to the classifier, oldest first."""
+        now = time.time()
+        return [
+            {
+                "time": time.strftime("%H:%M", time.localtime(entry["date"])),
+                "from": f"{entry['name']} <{entry['identity']}>",
+                "kind": entry["kind"],
+                "text": entry["text"],
+            }
+            for entry in self.recent.get(chat, ())
+            if now - entry["date"] <= CONTEXT_SPAN
+        ]
 
     def observe(
         self, chat, subject, sender, event, message=None, *, edited=False, reaction=None
@@ -796,6 +854,7 @@ class Bot:
             ):
                 sender = member["new_chat_member"]["user"]
                 # Both chat_member and new_chat_members may describe the same join.
+                self.record(chat, "user:" + str(sender["id"]), sender, kind="join")
                 self.observe(chat, "user:" + str(sender["id"]), sender, "join")
             return
         message = update.get("message", update.get("edited_message"))
@@ -804,6 +863,9 @@ class Bot:
         chat = message["chat"]["id"]
         if message.get("new_chat_members"):
             for sender in message["new_chat_members"]:
+                self.record(
+                    chat, "user:" + str(sender["id"]), sender, message, kind="join"
+                )
                 self.observe(chat, "user:" + str(sender["id"]), sender, "join", message)
             return  # The inviter is not the subject of a join service message.
         if message.get("left_chat_member") or not message.get("message_id"):
@@ -811,6 +873,8 @@ class Bot:
         subject = identity(message)
         if subject:
             edited = "edited_message" in update
+            if not edited:
+                self.record(chat, subject[0], subject[1], message)
             self.observe(
                 chat,
                 *subject,
