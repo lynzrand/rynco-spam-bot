@@ -21,6 +21,7 @@ class FakeTelegram:
         self.failures = {}
         self.sequence = 1000
         self.photos = []
+        self.bios = {}
         self.chat = {"description": "Discussion", "type": "supergroup"}
 
     def call(self, method, **params):
@@ -30,6 +31,8 @@ class FakeTelegram:
         if method == "getChatMember":
             return self.members.get(params["user_id"], {"status": "member"})
         if method == "getChat":
+            if params.get("chat_id") in self.bios:
+                return {"bio": self.bios[params["chat_id"]]}
             return dict(self.chat)
         if method == "getUserProfilePhotos":
             return {"photos": self.photos}
@@ -212,6 +215,78 @@ class BotTests(unittest.TestCase):
         self.model.category = "other"
         self.send(text="这个机器人挺好玩 https://t.me/Honey_FarmBot?start=458338")
         self.assertIsNone(self.case())
+
+    def test_bio_key_ignores_decoration(self):
+        from bot import bio_key
+        self.assertEqual(
+            bio_key("Cards never lie about midnight temptations. Write to me in private 🕯️"),
+            bio_key("cards  never lie about MIDNIGHT temptations. write to me in private"),
+        )
+        self.assertEqual(bio_key("\u200b看我简介"), "看我简介")
+        self.assertEqual(bio_key(None), "")
+
+    def test_invite_bio_marks_a_private_contact_invitation(self):
+        from bot import bio_key, invite_bio
+        self.assertTrue(invite_bio(bio_key("Write to me in private 🕯️")))
+        self.assertTrue(invite_bio(bio_key("有事私信我")))
+        self.assertFalse(invite_bio(bio_key("Discussion about compilers")))
+
+    def test_shared_bio_with_invite_bans_the_second_account(self):
+        # 2026-11-15: "Mary Albert"/MILEAGE2054 and "Natalie Black"/OCCURRED_1902 joined
+        # 20 minutes apart wearing one identical bio. The model cannot see a shared
+        # script, and the bio names no product, so it answers out-of-scope/other.
+        bio = "Cards never lie about midnight temptations. Write to me in private 🕯️"
+        self.model.verdict, self.model.category = "clean", "other"
+        self.tg.bios[11] = bio
+        self.send(1, **{"from": {"id": 11, "first_name": "Mary Albert"}})
+        self.assertIsNone(self.case())
+        self.tg.bios[12] = bio
+        with self.assertLogs("spam-bot", level="INFO") as logs:
+            self.send(2, **{"from": {"id": 12, "first_name": "Natalie Black"}})
+        self.assertEqual(self.case()["phase"], "banned")
+        self.assertTrue(self.tg.calls_for("banChatMember"))
+        self.assertIn("verdict=spam (shared-bio)", logs.output[-1])
+        self.assertIn("bio-cluster=2", logs.output[-1])
+        self.assertIn("2 different accounts", self.case()["reason"])
+
+    def test_shared_bio_without_an_invite_never_bans(self):
+        # A matching bio alone (a quote, a couple's shared line) is not evidence.
+        bio = "Stay hungry, stay foolish, keep building compilers forever"
+        self.model.verdict, self.model.category = "clean", "other"
+        self.tg.bios[21] = bio
+        self.send(1, **{"from": {"id": 21, "first_name": "A"}})
+        self.tg.bios[22] = bio
+        with self.assertLogs("spam-bot", level="INFO") as logs:
+            self.send(2, **{"from": {"id": 22, "first_name": "B"}})
+        self.assertIsNone(self.case())
+        self.assertFalse(self.tg.calls_for("banChatMember"))
+        self.assertIn("bio-cluster=2", logs.output[-1])
+
+    def test_invite_bio_alone_stays_out_of_scope(self):
+        # One account whose bio only invites private contact names no in-scope offer;
+        # the scope lock still lets it through rather than banning on a hunch.
+        self.model.verdict, self.model.category = "spam", "other"
+        self.tg.bios[31] = "Cards never lie about midnight temptations. Write to me in private 🕯️"
+        with self.assertLogs("spam-bot", level="INFO") as logs:
+            self.send(1, **{"from": {"id": 31, "first_name": "Solo"}})
+        self.assertIsNone(self.case())
+        self.assertFalse(self.tg.calls_for("banChatMember"))
+        self.assertIn("(category=other)", logs.output[-1])
+
+    def test_same_invite_on_different_bios_never_bans(self):
+        self.model.verdict, self.model.category = "clean", "other"
+        self.tg.bios[41] = "Fountain pens and tea notes, write to me in private"
+        self.send(1, **{"from": {"id": 41, "first_name": "C"}})
+        self.tg.bios[42] = "Mechanical keyboards nightly, write to me in private"
+        self.send(2, **{"from": {"id": 42, "first_name": "D"}})
+        self.assertIsNone(self.case())
+        self.assertFalse(self.tg.calls_for("banChatMember"))
+
+    def test_invite_counts_as_a_profile_class(self):
+        from bot import profile_factors
+        self.assertEqual(
+            profile_factors({"description": "Write to me in private"}), {"invite"}
+        )
 
     def test_gambling_message_bans(self):
         self.model.verdict = "spam"

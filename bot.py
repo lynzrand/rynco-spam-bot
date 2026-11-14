@@ -221,6 +221,61 @@ def referral_funnel(text):
     return payload
 
 
+# A private-contact invitation is itself the promotional element (Rynco's scope lock
+# counts an invite alongside a handle, link, QR or price), so a profile that only says
+# "write to me in private" is ad-shaped even when it names no product. It is one factor
+# among several, never a verdict on its own.
+INVITE_MARKERS = (
+    "write to me",
+    "message me",
+    "text me",
+    "in private",
+    "in dm",
+    "in dms",
+    "私信我",
+    "私聊我",
+    "私我",
+    "写信给我",
+    "来私信",
+)
+
+# Two accounts cannot independently arrive at the same sentence: an identical profile bio
+# on distinct identities is a shared script, not a person (2026-11-15: "Mary Albert"
+# /MILEAGE2054 and "Natalie Black"/OCCURRED_1902 joined 20 minutes apart wearing
+# "Cards never lie about midnight temptations. Write to me in private 🕯️" verbatim).
+# The cluster is measured structure, not an inference from wording — but it is still only
+# acted on when the script carries a private-contact invite, so a group of friends
+# copy-pasting one quote bio cannot be banned by sharing it.
+SHARED_BIO_MIN_CHARS = 16
+
+
+def bio_key(text):
+    """Comparison key for a profile bio: case, width, space, emoji and zero-width
+    decoration are all irrelevant, so two copies of one script still match."""
+    if not isinstance(text, str):
+        return ""
+    cleaned = "".join(
+        ch
+        for ch in unicodedata.normalize("NFKC", text)
+        if unicodedata.category(ch) not in ("Cf", "Cs", "So", "Sk", "Mn")
+    )
+    return " ".join(cleaned.casefold().split())
+
+
+def invite_bio(key):
+    return any(marker in key for marker in INVITE_MARKERS)
+
+
+def shared_bio(db, chat, identity, key):
+    """How many distinct identities in this chat wear this same bio (2 = a pair)."""
+    if len(key) < SHARED_BIO_MIN_CHARS:
+        return 0
+    return db.execute(
+        "SELECT count(DISTINCT identity) FROM profiles WHERE chat=? AND bio=?",
+        (chat, key),
+    ).fetchone()[0]
+
+
 def profile_factors(profile):
     """Independent profile signals a ban may be corroborated with."""
     text = profile_text(profile)
@@ -233,6 +288,8 @@ def profile_factors(profile):
         factors.add("contact")
     if any(marker in text for marker in TARGET_MARKERS):
         factors.add("target")
+    if any(marker in text for marker in INVITE_MARKERS):
+        factors.add("invite")
     if COMMERCIAL_PATTERN.search(text):
         factors.add("commercial")
     return factors
@@ -250,6 +307,10 @@ def database(path):
         );
         CREATE TABLE IF NOT EXISTS subjects (
             chat INTEGER, identity TEXT, exempt INTEGER DEFAULT 0,
+            PRIMARY KEY (chat, identity)
+        );
+        CREATE TABLE IF NOT EXISTS profiles (
+            chat INTEGER, identity TEXT, bio TEXT, seen REAL,
             PRIMARY KEY (chat, identity)
         );
         CREATE TABLE IF NOT EXISTS observations (
@@ -324,7 +385,7 @@ class Bot:
             is not None
         )
 
-    def evidence(self, subject, sender, message):
+    def evidence(self, chat, subject, sender, message):
         kind, target = subject.split(":")
         profile = {
             k: sender[k]
@@ -340,6 +401,14 @@ class Bot:
             profile["description"] = info.get("bio", info.get("description"))
         except APIError:
             info = {}  # User bios are not generally available to a group bot.
+        key = bio_key(profile["description"])
+        if key:
+            with self.db:
+                self.db.execute(
+                    "INSERT INTO profiles(chat,identity,bio,seen) VALUES (?,?,?,?) "
+                    "ON CONFLICT(chat,identity) DO UPDATE SET bio=excluded.bio,seen=excluded.seen",
+                    (chat, subject, key, time.time()),
+                )
         try:
             if kind == "user":
                 photos = self.tg.call(
@@ -513,9 +582,11 @@ class Bot:
         downgrade = None
         basis = None
         category = ""
+        cluster = 0
+        scripted = False
         try:
             evidence, images = self.evidence(
-                subject, sender, message if event != "join" else None
+                chat, subject, sender, message if event != "join" else None
             )
             missing_media = evidence["missing_media"]
             if reaction:
@@ -536,6 +607,14 @@ class Bot:
             if reaction is not None or event == "join":
                 basis = "profile"  # no message content to carry a verdict
             factors = profile_factors(evidence["profile"]) if basis == "profile" else set()
+            key = bio_key(evidence["profile"].get("description"))
+            cluster = shared_bio(self.db, chat, subject, key)
+            # Deterministic shape rule, ahead of the scope gate: an identical bio worn by
+            # two or more accounts, carrying an invitation to private contact. There is no
+            # benign reading of a shared DM funnel script, and the wording need not name a
+            # service for the model to see it — a join carries no message to classify at
+            # all, so waiting for a profile-basis verdict would never fire.
+            scripted = cluster >= 2 and invite_bio(key)
             if referral_funnel(evidence["message"].get("text")):
                 # Deterministic shape rule, checked before the scope gate: a bare
                 # referral deep link has no category to judge, so the model's
@@ -561,6 +640,16 @@ class Bot:
                         "for a vote. " + result["reason"]
                     )[:300],
                 }
+            elif scripted:
+                downgrade = "shared-bio"
+                result = {
+                    "verdict": "spam",
+                    "reason": (
+                        "The same profile bio, inviting private contact, is worn by "
+                        f"{cluster} different accounts: a shared script, not one person. "
+                        + result["reason"]
+                    )[:300],
+                }
             elif category in KNOWN_CATEGORIES and category not in SCOPE_CATEGORIES:
                 downgrade = "category=other"
                 result = {
@@ -580,7 +669,8 @@ class Bot:
                     )[:300],
                 }
             elif result["verdict"] == "spam" and not (
-                basis == "message"
+                scripted
+                or basis == "message"
                 or (basis == "profile" and len(factors) >= 2 and "target" in factors)
             ):
                 downgrade = (
@@ -653,7 +743,7 @@ class Bot:
             )
         # One line per classification: the group-visible reason a case exists or not.
         LOG.info(
-            "Decision case=%s chat=%s identity=%s event=%s verdict=%s%s basis=%s category=%s media=%s reason=%s",
+            "Decision case=%s chat=%s identity=%s event=%s verdict=%s%s basis=%s category=%s media=%s%s reason=%s",
             case_id or "-",
             chat,
             subject,
@@ -663,6 +753,7 @@ class Bot:
             basis or "-",
             category or "-",
             ",".join(missing_media) or "-",
+            f" bio-cluster={cluster}" if cluster >= 2 else "",
             " ".join(result["reason"].split()),
         )
 
