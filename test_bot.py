@@ -216,52 +216,21 @@ class BotTests(unittest.TestCase):
         self.send(text="这个机器人挺好玩 https://t.me/Honey_FarmBot?start=458338")
         self.assertIsNone(self.case())
 
-    def test_bio_key_ignores_decoration(self):
-        from bot import bio_key
-        self.assertEqual(
-            bio_key("Cards never lie about midnight temptations. Write to me in private 🕯️"),
-            bio_key("cards  never lie about MIDNIGHT temptations. write to me in private"),
-        )
-        self.assertEqual(bio_key("\u200b看我简介"), "看我简介")
-        self.assertEqual(bio_key(None), "")
-
-    def test_invite_bio_marks_a_private_contact_invitation(self):
-        from bot import bio_key, invite_bio
-        self.assertTrue(invite_bio(bio_key("Write to me in private 🕯️")))
-        self.assertTrue(invite_bio(bio_key("有事私信我")))
-        self.assertFalse(invite_bio(bio_key("Discussion about compilers")))
-
-    def test_shared_bio_with_invite_flags_a_vote_not_a_ban(self):
-        # 2026-11-15: "Mary Albert"/MILEAGE2054 and "Natalie Black"/OCCURRED_1902 joined
-        # 20 minutes apart wearing one identical bio. The model cannot see a shared
-        # script, and the bio names no product, so it answers out-of-scope/other. The
-        # cluster is surfaced to the members, who ban; the bot never bans on it.
-        bio = "Cards never lie about midnight temptations. Write to me in private 🕯️"
+    def test_shared_bio_is_not_specially_checked(self):
+        # 2026-11-16: Rynco retired the shared-bio lookup ("同简介不用特意查") — the
+        # operator judges by context, so two accounts wearing one identical bio and
+        # joining without a message are left alone rather than clustered.
+        bio = "Cards never lie about midnight temptations. Write to me in private \U0001f56f\ufe0f"
         self.model.verdict, self.model.category = "clean", "other"
         self.tg.bios[11] = bio
         self.send(1, **{"from": {"id": 11, "first_name": "Mary Albert"}})
-        self.assertIsNone(self.case())
         self.tg.bios[12] = bio
         with self.assertLogs("spam-bot", level="INFO") as logs:
             self.send(2, **{"from": {"id": 12, "first_name": "Natalie Black"}})
-        self.assertEqual(self.case()["phase"], "review")
-        self.assertFalse(self.tg.calls_for("banChatMember"))
-        self.assertIn("verdict=suspicious (shared-bio)", logs.output[-1])
-        self.assertIn("bio-cluster=2", logs.output[-1])
-        self.assertIn("2 different accounts", self.case()["reason"])
-
-    def test_shared_bio_without_an_invite_never_bans(self):
-        # A matching bio alone (a quote, a couple's shared line) is not evidence.
-        bio = "Stay hungry, stay foolish, keep building compilers forever"
-        self.model.verdict, self.model.category = "clean", "other"
-        self.tg.bios[21] = bio
-        self.send(1, **{"from": {"id": 21, "first_name": "A"}})
-        self.tg.bios[22] = bio
-        with self.assertLogs("spam-bot", level="INFO") as logs:
-            self.send(2, **{"from": {"id": 22, "first_name": "B"}})
         self.assertIsNone(self.case())
         self.assertFalse(self.tg.calls_for("banChatMember"))
-        self.assertIn("bio-cluster=2", logs.output[-1])
+        self.assertNotIn("bio-cluster", logs.output[-1])
+        self.assertNotIn("shared-bio", logs.output[-1])
 
     def test_invite_bio_alone_stays_out_of_scope(self):
         # One account whose bio only invites private contact names no in-scope offer;

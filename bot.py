@@ -240,46 +240,6 @@ INVITE_MARKERS = (
     "来私信",
 )
 
-# Two accounts cannot independently arrive at the same sentence: an identical profile bio
-# on distinct identities is a shared script, not a person (2026-11-15: "Mary Albert"
-# /MILEAGE2054 and "Natalie Black"/OCCURRED_1902 joined 20 minutes apart wearing
-# "Cards never lie about midnight temptations. Write to me in private 🕯️" verbatim).
-# The cluster is measured structure, not an inference from wording — but it is still only
-# reported when the script carries a private-contact invite, so a group of friends
-# copy-pasting one quote bio is never flagged by sharing it.
-# It is EVIDENCE FOR A VOTE, never a ban: Rynco's call (2026-11-15) is that the operator
-# judges by context, not by a normalized-text comparison, so this only surfaces the case
-# to the members with the cluster count and the reason spelled out.
-SHARED_BIO_MIN_CHARS = 16
-
-
-def bio_key(text):
-    """Comparison key for a profile bio: case, width, space, emoji and zero-width
-    decoration are all irrelevant, so two copies of one script still match."""
-    if not isinstance(text, str):
-        return ""
-    cleaned = "".join(
-        ch
-        for ch in unicodedata.normalize("NFKC", text)
-        if unicodedata.category(ch) not in ("Cf", "Cs", "So", "Sk", "Mn")
-    )
-    return " ".join(cleaned.casefold().split())
-
-
-def invite_bio(key):
-    return any(marker in key for marker in INVITE_MARKERS)
-
-
-def shared_bio(db, chat, identity, key):
-    """How many distinct identities in this chat wear this same bio (2 = a pair)."""
-    if len(key) < SHARED_BIO_MIN_CHARS:
-        return 0
-    return db.execute(
-        "SELECT count(DISTINCT identity) FROM profiles WHERE chat=? AND bio=?",
-        (chat, key),
-    ).fetchone()[0]
-
-
 def profile_factors(profile):
     """Independent profile signals a ban may be corroborated with."""
     text = profile_text(profile)
@@ -311,10 +271,6 @@ def database(path):
         );
         CREATE TABLE IF NOT EXISTS subjects (
             chat INTEGER, identity TEXT, exempt INTEGER DEFAULT 0,
-            PRIMARY KEY (chat, identity)
-        );
-        CREATE TABLE IF NOT EXISTS profiles (
-            chat INTEGER, identity TEXT, bio TEXT, seen REAL,
             PRIMARY KEY (chat, identity)
         );
         CREATE TABLE IF NOT EXISTS observations (
@@ -415,14 +371,6 @@ class Bot:
             profile["description"] = info.get("bio", info.get("description"))
         except APIError:
             info = {}  # User bios are not generally available to a group bot.
-        key = bio_key(profile["description"])
-        if key:
-            with self.db:
-                self.db.execute(
-                    "INSERT INTO profiles(chat,identity,bio,seen) VALUES (?,?,?,?) "
-                    "ON CONFLICT(chat,identity) DO UPDATE SET bio=excluded.bio,seen=excluded.seen",
-                    (chat, subject, key, time.time()),
-                )
         try:
             if kind == "user":
                 photos = self.tg.call(
@@ -643,8 +591,6 @@ class Bot:
         downgrade = None
         basis = None
         category = ""
-        cluster = 0
-        scripted = False
         try:
             evidence, images = self.evidence(
                 chat, subject, sender, message if event != "join" else None
@@ -668,14 +614,6 @@ class Bot:
             if reaction is not None or event == "join":
                 basis = "profile"  # no message content to carry a verdict
             factors = profile_factors(evidence["profile"]) if basis == "profile" else set()
-            key = bio_key(evidence["profile"].get("description"))
-            cluster = shared_bio(self.db, chat, subject, key)
-            # Shape rule, ahead of the scope gate: an identical bio worn by two or more
-            # accounts, carrying an invitation to private contact. The wording need not
-            # name a service for the model to see it — a join carries no message to
-            # classify at all, so waiting for a profile-basis verdict would never fire.
-            # It surfaces a vote only, never a ban (Rynco: judge by context).
-            scripted = cluster >= 2 and invite_bio(key)
             if referral_funnel(evidence["message"].get("text")):
                 # Deterministic shape rule, checked before the scope gate: a bare
                 # referral deep link has no category to judge, so the model's
@@ -699,16 +637,6 @@ class Bot:
                     "reason": (
                         "No message content and no profile signal: not enough evidence "
                         "for a vote. " + result["reason"]
-                    )[:300],
-                }
-            elif scripted:
-                downgrade = "shared-bio"
-                result = {
-                    "verdict": "suspicious",
-                    "reason": (
-                        "The same profile bio, inviting private contact, is worn by "
-                        f"{cluster} different accounts: a shared script, not one person. "
-                        "Members decide. " + result["reason"]
                     )[:300],
                 }
             elif category in KNOWN_CATEGORIES and category not in SCOPE_CATEGORIES:
@@ -803,7 +731,7 @@ class Bot:
             )
         # One line per classification: the group-visible reason a case exists or not.
         LOG.info(
-            "Decision case=%s chat=%s identity=%s event=%s verdict=%s%s basis=%s category=%s media=%s%s reason=%s",
+            "Decision case=%s chat=%s identity=%s event=%s verdict=%s%s basis=%s category=%s media=%s reason=%s",
             case_id or "-",
             chat,
             subject,
@@ -813,7 +741,6 @@ class Bot:
             basis or "-",
             category or "-",
             ",".join(missing_media) or "-",
-            f" bio-cluster={cluster}" if cluster >= 2 else "",
             " ".join(result["reason"].split()),
         )
 
