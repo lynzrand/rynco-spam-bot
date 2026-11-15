@@ -245,8 +245,11 @@ INVITE_MARKERS = (
 # /MILEAGE2054 and "Natalie Black"/OCCURRED_1902 joined 20 minutes apart wearing
 # "Cards never lie about midnight temptations. Write to me in private 🕯️" verbatim).
 # The cluster is measured structure, not an inference from wording — but it is still only
-# acted on when the script carries a private-contact invite, so a group of friends
-# copy-pasting one quote bio cannot be banned by sharing it.
+# reported when the script carries a private-contact invite, so a group of friends
+# copy-pasting one quote bio is never flagged by sharing it.
+# It is EVIDENCE FOR A VOTE, never a ban: Rynco's call (2026-11-15) is that the operator
+# judges by context, not by a normalized-text comparison, so this only surfaces the case
+# to the members with the cluster count and the reason spelled out.
 SHARED_BIO_MIN_CHARS = 16
 
 
@@ -667,11 +670,11 @@ class Bot:
             factors = profile_factors(evidence["profile"]) if basis == "profile" else set()
             key = bio_key(evidence["profile"].get("description"))
             cluster = shared_bio(self.db, chat, subject, key)
-            # Deterministic shape rule, ahead of the scope gate: an identical bio worn by
-            # two or more accounts, carrying an invitation to private contact. There is no
-            # benign reading of a shared DM funnel script, and the wording need not name a
-            # service for the model to see it — a join carries no message to classify at
-            # all, so waiting for a profile-basis verdict would never fire.
+            # Shape rule, ahead of the scope gate: an identical bio worn by two or more
+            # accounts, carrying an invitation to private contact. The wording need not
+            # name a service for the model to see it — a join carries no message to
+            # classify at all, so waiting for a profile-basis verdict would never fire.
+            # It surfaces a vote only, never a ban (Rynco: judge by context).
             scripted = cluster >= 2 and invite_bio(key)
             if referral_funnel(evidence["message"].get("text")):
                 # Deterministic shape rule, checked before the scope gate: a bare
@@ -701,11 +704,11 @@ class Bot:
             elif scripted:
                 downgrade = "shared-bio"
                 result = {
-                    "verdict": "spam",
+                    "verdict": "suspicious",
                     "reason": (
                         "The same profile bio, inviting private contact, is worn by "
                         f"{cluster} different accounts: a shared script, not one person. "
-                        + result["reason"]
+                        "Members decide. " + result["reason"]
                     )[:300],
                 }
             elif category in KNOWN_CATEGORIES and category not in SCOPE_CATEGORIES:
@@ -727,8 +730,7 @@ class Bot:
                     )[:300],
                 }
             elif result["verdict"] == "spam" and not (
-                scripted
-                or basis == "message"
+                basis == "message"
                 or (basis == "profile" and len(factors) >= 2 and "target" in factors)
             ):
                 downgrade = (

@@ -231,10 +231,11 @@ class BotTests(unittest.TestCase):
         self.assertTrue(invite_bio(bio_key("有事私信我")))
         self.assertFalse(invite_bio(bio_key("Discussion about compilers")))
 
-    def test_shared_bio_with_invite_bans_the_second_account(self):
+    def test_shared_bio_with_invite_flags_a_vote_not_a_ban(self):
         # 2026-11-15: "Mary Albert"/MILEAGE2054 and "Natalie Black"/OCCURRED_1902 joined
         # 20 minutes apart wearing one identical bio. The model cannot see a shared
-        # script, and the bio names no product, so it answers out-of-scope/other.
+        # script, and the bio names no product, so it answers out-of-scope/other. The
+        # cluster is surfaced to the members, who ban; the bot never bans on it.
         bio = "Cards never lie about midnight temptations. Write to me in private 🕯️"
         self.model.verdict, self.model.category = "clean", "other"
         self.tg.bios[11] = bio
@@ -243,9 +244,9 @@ class BotTests(unittest.TestCase):
         self.tg.bios[12] = bio
         with self.assertLogs("spam-bot", level="INFO") as logs:
             self.send(2, **{"from": {"id": 12, "first_name": "Natalie Black"}})
-        self.assertEqual(self.case()["phase"], "banned")
-        self.assertTrue(self.tg.calls_for("banChatMember"))
-        self.assertIn("verdict=spam (shared-bio)", logs.output[-1])
+        self.assertEqual(self.case()["phase"], "review")
+        self.assertFalse(self.tg.calls_for("banChatMember"))
+        self.assertIn("verdict=suspicious (shared-bio)", logs.output[-1])
         self.assertIn("bio-cluster=2", logs.output[-1])
         self.assertIn("2 different accounts", self.case()["reason"])
 
