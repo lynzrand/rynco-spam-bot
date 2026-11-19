@@ -67,6 +67,20 @@ invite-farming ad unseen (2026-11-13, a stranger's only message was @Honey_FarmB
 offer. Zero-width, emoji and other decoration are stripped before matching; a bot link
 without `?start=`, a non-bot link, or a link beside any text keeps the normal path.
 
+**Manual report (`/report`).** Reply to any message with `/report` (optionally
+`/report <note>`) and the bot opens a review notice replying to that message, with
+**agree** and **not spam** buttons. The reporter's command is the **first of three
+endorsements**, so two more current members ban the identity; three *not spam*
+endorsements close the case without a ban. The ban then takes the normal path: no
+`revoke_messages`, deletions limited to the last ten minutes (the reported message is
+included even if the bot never observed it), and the same 5-hour moderator **undo**.
+The classifier is not consulted — a manual report is the members' judgment, so the
+in-scope category gate does not apply to it. A report is refused for administrators,
+the reporter's own message, bot or anonymous-admin posts, and an identity that already
+has an open or handled case; a second `/report` on an open case only adds the
+reporter's endorsement. Every refusal is answered in the group, since the bot cannot
+DM a member.
+
 - Check the first **10 distinct observed messages per identity per group** (adjust
   `FIRST_MESSAGES`), plus the first observed join/profile event. Join messages do
   not consume the ten-message budget. Repeated join updates with unchanged user

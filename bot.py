@@ -31,6 +31,9 @@ SCOPE_CATEGORIES = {"gambling", "adult", "account"}
 KNOWN_CATEGORIES = SCOPE_CATEGORIES | {"other"}
 # How long a ban notice accepts "not spam"; the notice expires with it.
 UNDO_WINDOW = 5 * 3600
+# Distinct current members needed to decide a case. A manual /report counts its
+# reporter as the first endorsement (Rynco, 2026-11-16: 三个人含举报者).
+DECISIVE_VOTES = 3
 # Only messages sent in the last ten minutes are deleted on a ban (Rynco, 2026-09-22):
 # scraping an occasional false positive's whole posting history out of the group is far
 # worse than leaving an old ad line behind. Message deletions are irreversible.
@@ -188,6 +191,15 @@ def profile_text(profile):
     ).lower()
 
 
+# Manual mode (2026-11-16): a member replies to a message with /report and the group
+# votes it out. The reporter's command is the first of three endorsements, so the
+# classifier is not consulted at all — this is the members' judgment, not the model's.
+REPORT_COMMAND = re.compile(
+    r"^/report(?:@[A-Za-z0-9_]{3,})?(?:\s+(?P<note>.+))?$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
 # A message whose entire content is a bot deep link carrying a referral payload
 # ("t.me/SomeBot?start=458338") is an invite-farming ad with nothing to read: no text,
 # no media, so the classifier can only answer clean/other and the ad never surfaces
@@ -283,6 +295,7 @@ def database(path):
         CREATE TABLE IF NOT EXISTS cases (
             id INTEGER PRIMARY KEY, chat INTEGER, identity TEXT, reason TEXT,
             display_name TEXT, source_message INTEGER,
+            manual INTEGER NOT NULL DEFAULT 0,
             phase TEXT, review_message INTEGER, ban_message INTEGER,
             expires REAL, deleted INTEGER DEFAULT 0, retry_at REAL DEFAULT 0,
             dirty INTEGER DEFAULT 1
@@ -302,6 +315,11 @@ def database(path):
                 "ALTER TABLE observations ADD COLUMN counted INTEGER NOT NULL DEFAULT 0"
             )
             db.execute("UPDATE observations SET counted=1 WHERE event!='join'")
+    if "manual" not in {row[1] for row in db.execute("PRAGMA table_info(cases)")}:
+        with db:
+            db.execute(
+                "ALTER TABLE cases ADD COLUMN manual INTEGER NOT NULL DEFAULT 0"
+            )
     return db
 
 
@@ -799,6 +817,14 @@ class Bot:
             return  # The inviter is not the subject of a join service message.
         if message.get("left_chat_member") or not message.get("message_id"):
             return
+        command = (
+            REPORT_COMMAND.match(message.get("text") or "")
+            if "message" in update
+            else None
+        )
+        if command:
+            self.report(chat, message, (command.group("note") or "").strip())
+            return
         subject = identity(message)
         if subject:
             edited = "edited_message" in update
@@ -902,17 +928,22 @@ class Bot:
         ):
             answer("The undo window has closed.")
             return
+        inserted, _ = self.cast(case, voter["id"], choice)
+        answer("Vote recorded." if inserted else "You have already voted.")
+
+    def cast(self, case, voter, choice):
+        """One immutable vote per member; the third decides the case."""
         with self.db:
             inserted = self.db.execute(
                 "INSERT OR IGNORE INTO votes VALUES (?,?,?)",
-                (case["id"], voter["id"], choice),
+                (case["id"], voter, choice),
             ).rowcount
             count = self.db.execute(
                 "SELECT count(*) FROM votes WHERE case_id=? AND choice=?",
                 (case["id"], choice),
             ).fetchone()[0]
             phase = case["phase"]
-            if count >= 3:
+            if count >= DECISIVE_VOTES:
                 phase = (
                     "restore"
                     if case["phase"] == "banned"
@@ -922,7 +953,119 @@ class Bot:
                 "UPDATE cases SET phase=?,dirty=1,retry_at=0 WHERE id=?",
                 (phase, case["id"]),
             )
-        answer("Vote recorded." if inserted else "You have already voted.")
+        return bool(inserted), count
+
+    def tell(self, chat, message, text):
+        """Answer a member's command in the group; the bot cannot open a DM."""
+        try:
+            self.tg.call(
+                "sendMessage",
+                chat_id=chat,
+                text=text,
+                reply_parameters={
+                    "message_id": message,
+                    "allow_sending_without_reply": True,
+                },
+                link_preview_options={"is_disabled": True},
+            )
+        except APIError as exc:
+            LOG.warning("Reply to a report command failed: %s", exc)
+
+    def report(self, chat, message, note=""):
+        """Manual mode: /report as a reply; three endorsements including the reporter."""
+        reporter = message.get("from") or {}
+        if not reporter.get("id") or reporter.get("is_bot"):
+            return
+        command = message["message_id"]
+        target = message.get("reply_to_message")
+        if not target:
+            self.tell(
+                chat,
+                command,
+                "Reply to the message you want to report, then send /report.",
+            )
+            return
+        reported = identity(target)
+        if not reported:
+            self.tell(chat, command, "That message cannot be reported.")
+            return
+        subject, sender = reported
+        kind, numeric = subject.split(":")
+        if subject == "user:" + str(reporter["id"]):
+            self.tell(chat, command, "You cannot report your own message.")
+            return
+        if not is_member(self.member(chat, reporter["id"])):
+            self.tell(chat, command, "Only current group members can report.")
+            return
+        if kind == "user":
+            try:
+                status = self.member(chat, int(numeric))["status"]
+            except APIError:
+                status = None  # They left; the report still stands.
+            if status in ADMINS:
+                self.tell(chat, command, "Administrators are not moderated here.")
+                return
+        handled = self.db.execute(
+            "SELECT * FROM cases WHERE chat=? AND identity=? AND phase IN ('ban','banned','restore') ORDER BY id DESC LIMIT 1",
+            (chat, subject),
+        ).fetchone()
+        if handled:
+            self.tell(
+                chat,
+                command,
+                f"Already handled: case {handled['id']} ({handled['phase']}).",
+            )
+            return
+        case = self.db.execute(
+            "SELECT * FROM cases WHERE chat=? AND identity=? AND phase='review' ORDER BY id DESC LIMIT 1",
+            (chat, subject),
+        ).fetchone()
+        if not case:
+            name = " ".join(
+                str(sender.get(k) or "") for k in ("first_name", "last_name")
+            ).strip() or str(sender.get("title") or sender.get("username") or "")
+            who = " ".join(
+                str(reporter.get(k) or "") for k in ("first_name", "last_name")
+            ).strip() or str(reporter["id"])
+            reason = f"Manual report by {who}" + (f": {note}" if note else ".")
+            with self.db:
+                case_id = self.db.execute(
+                    "INSERT INTO cases(chat,identity,reason,phase,display_name,source_message,manual) VALUES (?,?,?,?,?,?,1)",
+                    (
+                        chat,
+                        subject,
+                        " ".join(reason.split())[:280],
+                        "review",
+                        " ".join(name.split())[:80],
+                        target["message_id"],
+                    ),
+                ).lastrowid
+                # The reported message must be reachable by the ban path's deletion
+                # query even when this identity was never observed (trusted, or older
+                # than the ten-message budget). counted=0 keeps the budget untouched.
+                self.db.execute(
+                    "INSERT OR IGNORE INTO observations(chat,identity,event,message,sent,counted) VALUES (?,?,?,?,?,0)",
+                    (
+                        chat,
+                        subject,
+                        str(target["message_id"]),
+                        target["message_id"],
+                        target.get("date") or time.time(),
+                    ),
+                )
+            case = self.db.execute(
+                "SELECT * FROM cases WHERE id=?", (case_id,)
+            ).fetchone()
+        inserted, count = self.cast(case, reporter["id"], "spam")
+        if not inserted:
+            self.tell(chat, command, "You have already endorsed this case.")
+            return
+        self.tell(
+            chat,
+            command,
+            f"Report filed against {subject} (case {case['id']}): "
+            f"{count} of {DECISIVE_VOTES} endorsements.",
+        )
 
     def delete(self, chat, message):
         try:
@@ -1029,12 +1172,23 @@ class Bot:
                     (case_id,),
                 ).fetchall()
             )
-            self.notice(
-                case,
-                f"Suspected spam: {label}\n{case['reason']}\nFirst to 3 distinct member votes wins.\nspam: {counts.get('spam', 0)} | not spam: {counts.get('clean', 0)}",
-                [[button("spam", "spam"), button("not spam", "clean")]],
-                "review_message",
-            )
+            if case["manual"]:
+                text = (
+                    f"Reported by a member: {label}\n{case['reason']}\n"
+                    f"The report counts as the first of {DECISIVE_VOTES} endorsements; "
+                    f"{DECISIVE_VOTES} ban this identity and a moderator can undo within "
+                    f"{UNDO_WINDOW // 3600} hours.\n"
+                    f"agree: {counts.get('spam', 0)} | not spam: {counts.get('clean', 0)}"
+                )
+                buttons = [[button("agree", "spam"), button("not spam", "clean")]]
+            else:
+                text = (
+                    f"Suspected spam: {label}\n{case['reason']}\n"
+                    f"First to {DECISIVE_VOTES} distinct member votes wins.\n"
+                    f"spam: {counts.get('spam', 0)} | not spam: {counts.get('clean', 0)}"
+                )
+                buttons = [[button("spam", "spam"), button("not spam", "clean")]]
+            self.notice(case, text, buttons, "review_message")
         elif phase in {"banned", "clean", "restored"}:
             if phase == "banned" and not case["ban_message"]:
                 self.notice(

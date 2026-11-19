@@ -1144,6 +1144,174 @@ class BotTests(unittest.TestCase):
         self.send(chat={"id": -999, "type": "supergroup"})
         self.assertFalse(self.model.calls)
 
+    STRANGER = {"id": 84, "first_name": "Stranger"}
+
+    def report_command(self, number, target=None, text="/report", reporter=None):
+        message = {
+            "message_id": number,
+            "date": int(time.time()),
+            "chat": {"id": CHAT, "type": "supergroup"},
+            "from": reporter or USER,
+            "text": text,
+        }
+        if target is not None:
+            message["reply_to_message"] = target
+        self.bot.update({"update_id": number, "message": message})
+        self.bot.maintain()
+        return message
+
+    def test_manual_report_needs_three_endorsements_reporter_included(self):
+        target = self.send(1, **{"from": self.STRANGER, "text": "hello"})
+        self.assertIsNone(self.case())
+        self.report_command(500, target=target, text="/report@rynco_spam_bot 卖号")
+        case = self.case()
+        self.assertEqual(case["phase"], "review")
+        self.assertEqual(case["manual"], 1)
+        self.assertEqual(case["source_message"], 1)
+        self.assertEqual(case["display_name"], "Stranger")
+        self.assertIn("Manual report by Example", case["reason"])
+        self.assertIn("卖号", case["reason"])
+        # The reporter's own report is the first of the three endorsements.
+        self.assertEqual(
+            self.db.execute("SELECT count(*) FROM votes").fetchone()[0], 1
+        )
+        notice = [
+            call
+            for call in self.tg.calls_for("sendMessage")
+            if "Reported by a member" in call["text"]
+        ][-1]
+        self.assertIn("agree: 1 | not spam: 0", notice["text"])
+        self.assertEqual(notice["reply_parameters"]["message_id"], 1)
+        self.assertEqual(
+            [b["text"] for b in notice["reply_markup"]["inline_keyboard"][0]],
+            ["agree", "not spam"],
+        )
+        self.vote(7, "spam")
+        self.assertEqual(self.case()["phase"], "review")
+        self.vote(8, "spam")
+        self.assertEqual(self.case()["phase"], "banned")
+        self.assertEqual(self.tg.calls_for("banChatMember")[0]["user_id"], 84)
+
+    def test_reporter_cannot_endorse_the_same_case_twice(self):
+        target = self.send(1, **{"from": self.STRANGER})
+        self.report_command(501, target=target)
+        self.vote(42, "spam")
+        self.assertEqual(
+            self.db.execute("SELECT count(*) FROM votes").fetchone()[0], 1
+        )
+        self.assertEqual(self.case()["phase"], "review")
+
+    def test_manual_report_requires_a_replied_to_message(self):
+        self.report_command(502)
+        self.assertIsNone(self.case())
+        self.assertIn(
+            "Reply to the message you want to report",
+            self.tg.calls_for("sendMessage")[-1]["text"],
+        )
+
+    def test_report_refuses_own_admin_and_bot_messages(self):
+        self.report_command(503, target=self.send(1))
+        self.assertIsNone(self.case())
+        self.tg.members[84] = {"status": "administrator"}
+        self.report_command(504, target=self.message(2, **{"from": self.STRANGER}))
+        self.assertIsNone(self.case())
+        bot_post = self.message(
+            3, **{"from": {"id": 891, "is_bot": True, "first_name": "bot"}}
+        )
+        self.report_command(505, target=bot_post)
+        self.assertIsNone(self.case())
+        self.assertFalse(self.tg.calls_for("banChatMember"))
+
+    def test_report_on_an_open_review_adds_an_endorsement_not_a_case(self):
+        self.model.verdict = "suspicious"
+        target = self.send(1, **{"from": self.STRANGER})
+        self.assertEqual(self.case()["phase"], "review")
+        self.report_command(506, target=target)
+        self.assertEqual(
+            self.db.execute("SELECT count(*) FROM cases").fetchone()[0], 1
+        )
+        self.assertEqual(self.case()["manual"], 0)
+        self.assertEqual(
+            self.db.execute("SELECT count(*) FROM votes").fetchone()[0], 1
+        )
+        self.vote(7, "spam")
+        self.vote(8, "spam")
+        self.assertEqual(self.case()["phase"], "banned")
+
+    def test_report_refuses_an_already_handled_identity(self):
+        self.model.verdict = "spam"
+        target = self.send(1, **{"from": self.STRANGER})
+        self.assertEqual(self.case()["phase"], "banned")
+        self.report_command(507, target=target)
+        self.assertEqual(
+            self.db.execute("SELECT count(*) FROM cases").fetchone()[0], 1
+        )
+        self.assertEqual(
+            self.db.execute("SELECT count(*) FROM votes").fetchone()[0], 0
+        )
+        self.assertIn(
+            "Already handled", self.tg.calls_for("sendMessage")[-1]["text"]
+        )
+
+    def test_report_command_is_not_classified_and_consumes_no_budget(self):
+        target = self.send(1, **{"from": self.STRANGER})
+        calls = len(self.model.calls)
+        self.report_command(508, target=target)
+        self.assertEqual(len(self.model.calls), calls)
+        self.assertEqual(
+            self.db.execute(
+                "SELECT count(*) FROM observations WHERE identity='user:42'"
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_three_not_spam_endorsements_close_a_manual_report_without_a_ban(self):
+        target = self.send(1, **{"from": self.STRANGER})
+        self.report_command(509, target=target)
+        for voter in (7, 8, 9):
+            self.vote(voter, "clean")
+        self.assertEqual(self.case()["phase"], "clean")
+        self.assertFalse(self.tg.calls_for("banChatMember"))
+
+    def test_manual_report_ban_deletes_an_unobserved_reported_message(self):
+        reply = self.message(77, **{"from": self.STRANGER, "text": "buy accounts"})
+        self.report_command(510, target=reply)
+        self.vote(7, "spam")
+        self.vote(8, "spam")
+        self.assertEqual(self.case()["phase"], "banned")
+        self.assertIn(
+            {"chat_id": CHAT, "message_id": 77},
+            self.tg.calls_for("deleteMessage"),
+        )
+
+    def test_report_on_a_channel_post_targets_the_sender_chat(self):
+        reply = self.message(78, sender_chat={"id": -900, "title": "Channel"})
+        self.report_command(511, target=reply)
+        self.assertEqual(self.case()["identity"], "chat:-900")
+        self.vote(7, "spam")
+        self.vote(8, "spam")
+        self.assertEqual(
+            self.tg.calls_for("banChatSenderChat")[0]["sender_chat_id"], -900
+        )
+
+    def test_report_in_a_foreign_chat_is_ignored(self):
+        target = self.message(1, **{"from": self.STRANGER})
+        self.bot.update(
+            {
+                "update_id": 512,
+                "message": {
+                    "message_id": 512,
+                    "date": int(time.time()),
+                    "chat": {"id": -999, "type": "supergroup"},
+                    "from": USER,
+                    "text": "/report",
+                    "reply_to_message": target,
+                },
+            }
+        )
+        self.assertIsNone(self.case())
+        self.assertFalse(self.tg.calls_for("sendMessage"))
+
 
 class ClassifierTests(unittest.TestCase):
     def test_multimodal_request_and_strict_response_validation(self):
